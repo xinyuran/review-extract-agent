@@ -1,6 +1,11 @@
 """
 AI Agent 全局配置
 
+支持三种后端模式：
+- cloud_api：对接云服务商 API（OpenAI / Anthropic / DeepSeek 等 OpenAI 兼容接口）
+- local_model：本地部署模型（vLLM / Ollama 等）
+- offline：无 LLM 可用，仅使用 jieba 提取关键词，不做情感分析
+
 支持双 LLM endpoint：
 - Agent LLM：负责 Agent 的规划、推理、工具选择（需要 Function Calling 能力）
 - Tool LLM：工具内部使用的 LLM（关键词提取、情感分析等）
@@ -8,6 +13,41 @@ AI Agent 全局配置
 """
 
 import os
+
+_CLOUD_API_HOSTS = (
+    "api.openai.com",
+    "api.anthropic.com",
+    "api.deepseek.com",
+    "dashscope.aliyuncs.com",
+    "api.moonshot.cn",
+    "api.siliconflow.cn",
+    "api.zhipuai.cn",
+    "open.bigmodel.cn",
+)
+
+
+def _detect_backend(base_url: str) -> str:
+    """
+    根据 base_url 自动判断后端类型。
+
+    Returns:
+        "cloud_api" | "local_model" | "offline"
+    """
+    if not base_url or base_url.strip().lower() in ("", "none", "offline"):
+        return "offline"
+
+    url_lower = base_url.lower()
+    for host in _CLOUD_API_HOSTS:
+        if host in url_lower:
+            return "cloud_api"
+
+    if "localhost" in url_lower or "127.0.0.1" in url_lower or "192.168." in url_lower or "10." in url_lower:
+        return "local_model"
+
+    if url_lower.startswith("http://") or url_lower.startswith("https://"):
+        return "cloud_api"
+
+    return "local_model"
 
 
 class AgentConfig:
@@ -47,14 +87,35 @@ class AgentConfig:
     TOOL_LLM_REPETITION_PENALTY = float(os.getenv("TOOL_LLM_REPETITION_PENALTY", "1.1"))
     TOOL_LLM_RESPONSE_FORMAT = {"type": "json_object"}
 
+    # ==================== 后端模式 ====================
+    # 显式指定: cloud_api / local_model / offline / auto(自动检测)
+    BACKEND_MODE = os.getenv("BACKEND_MODE", "auto").strip().lower()
+
     # ==================== Agent 控制参数 ====================
-    # 工具调用模式：native（原生 Function Calling，推荐）、prompt（prompt-based）、auto（探测）
-    # native 模式下 vLLM 需启动时加 --enable-auto-tool-choice --tool-call-parser hermes
-    # Hermes 解析器会保留 <tool_call> 标签前的文本到 message.content（即 Thought）
     AGENT_TOOL_CALLING_MODE = os.getenv("AGENT_TOOL_CALLING_MODE", "native").strip()
     AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "10"))
     AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT", "1200"))
     TOOL_TIMEOUT = int(os.getenv("TOOL_TIMEOUT", "1200"))
+
+    def get_backend_mode(self) -> str:
+        """
+        返回当前后端模式。
+
+        若 BACKEND_MODE 为 auto，则根据 AGENT_LLM_BASE_URL 自动检测。
+        """
+        if self.BACKEND_MODE not in ("auto", ""):
+            return self.BACKEND_MODE
+        return _detect_backend(self.AGENT_LLM_BASE_URL)
+
+    def get_backend_label(self) -> str:
+        """返回人类可读的后端描述。"""
+        mode = self.get_backend_mode()
+        if mode == "cloud_api":
+            return f"[cloud] 云服务 API ({self.AGENT_LLM_BASE_URL})"
+        elif mode == "local_model":
+            return f"[local] 本地部署模型 ({self.AGENT_LLM_BASE_URL})"
+        else:
+            return "[offline] 离线模式 (jieba-tfidf 关键词提取, 无情感分析)"
 
     # ==================== 预处理配置 ====================
     ENABLE_PREPROCESS = True
@@ -116,6 +177,18 @@ class AgentConfig:
     REFLECTION_MIN_KEYWORDS_MEDIUM = 5     # 20 <= 原文 < 60 字
     REFLECTION_MIN_KEYWORDS_LONG = 8       # 60 <= 原文 < 120 字
     REFLECTION_MIN_KEYWORDS_XLONG = 10     # 原文 >= 120 字
+
+    # ==================== Skill 层配置 ====================
+    SKILLS_DIR = os.getenv("SKILLS_DIR", "")
+
+    # ==================== 轨迹采集配置 (Phase 2) ====================
+    ENABLE_TRAJECTORY = os.getenv("ENABLE_TRAJECTORY", "False").lower() == "true"
+    TRAJECTORY_OUTPUT_DIR = os.getenv("TRAJECTORY_OUTPUT_DIR", "extract_agent_output/trajectory")
+    TRAJECTORY_INCLUDE_THINKING = os.getenv("TRAJECTORY_INCLUDE_THINKING", "True").lower() == "true"
+
+    # ==================== 知识积累配置 (Phase 3) ====================
+    ENABLE_KNOWLEDGE = os.getenv("ENABLE_KNOWLEDGE", "False").lower() == "true"
+    KNOWLEDGE_STORE_DIR = os.getenv("KNOWLEDGE_STORE_DIR", "extract_agent_output/knowledge_store")
 
     # ==================== 调试配置 ====================
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"

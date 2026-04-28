@@ -2,6 +2,7 @@
 config 命令 — 查看/初始化配置文件
 """
 
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -11,10 +12,12 @@ from rich.table import Table
 
 from ..config_loader import (
     DEFAULT_OUTPUT_DIR,
+    _PACKAGE_ROOT,
     find_config_file,
     init_config_file,
     load_config,
     get_default_yaml,
+    get_default_env,
     USER_CONFIG_FILE,
 )
 
@@ -25,7 +28,7 @@ def config_command(
     init: bool = typer.Option(
         False,
         "--init",
-        help="在用户目录初始化默认配置文件",
+        help="在用户目录初始化默认配置文件（YAML + .env）",
     ),
     show: bool = typer.Option(
         False,
@@ -53,33 +56,46 @@ def config_command(
 
 
 def _handle_init() -> None:
-    if USER_CONFIG_FILE.is_file():
-        console.print(
-            f"[yellow]配置文件已存在: {USER_CONFIG_FILE}[/yellow]"
-        )
-        overwrite = typer.confirm("是否覆盖？", default=False)
-        if not overwrite:
-            console.print("[dim]已取消[/dim]")
-            return
+    env_target = _PACKAGE_ROOT / ".env"
+    created_files = []
 
-    path = init_config_file()
-    console.print(f"[green]配置文件已创建: {path}[/green]")
-    console.print()
-    syntax = Syntax(
-        get_default_yaml(), "yaml", theme="monokai", line_numbers=True
-    )
-    console.print(syntax)
+    if env_target.is_file():
+        console.print(f"[yellow].env 文件已存在: {env_target}[/yellow]")
+        if typer.confirm("是否覆盖 .env？", default=False):
+            env_target.write_text(get_default_env(), encoding="utf-8")
+            created_files.append(str(env_target))
+    else:
+        env_target.write_text(get_default_env(), encoding="utf-8")
+        created_files.append(str(env_target))
+
+    if USER_CONFIG_FILE.is_file():
+        console.print(f"[yellow]YAML 配置文件已存在: {USER_CONFIG_FILE}[/yellow]")
+        if typer.confirm("是否覆盖 YAML？", default=False):
+            path = init_config_file()
+            created_files.append(str(path))
+    else:
+        path = init_config_file()
+        created_files.append(str(path))
+
+    if created_files:
+        for f in created_files:
+            console.print(f"[green]已创建: {f}[/green]")
+        console.print()
+        console.print("[bold]推荐使用 .env 文件管理配置：[/bold]")
+        console.print(f"[dim]  编辑 {env_target} 即可修改 API 地址、密钥等参数[/dim]")
+    else:
+        console.print("[dim]未创建任何文件[/dim]")
 
 
 def _handle_show(config_path: Optional[str]) -> None:
-    config_file = find_config_file(config_path)
     config = load_config(config_path)
 
     console.print()
-    if config_file:
-        console.print(f"[bold green]配置来源:[/bold green] {config_file}")
-    else:
-        console.print("[bold yellow]配置来源:[/bold yellow] 使用默认配置（未找到配置文件）")
+    console.print(f"[bold green]配置来源:[/bold green] {config._config_source}")
+    env_file = getattr(config, "_env_file", None)
+    if env_file:
+        console.print(f"[bold green].env 文件:[/bold green] {env_file}")
+    console.print(f"[bold green]后端模式:[/bold green] {config.get_backend_label()}")
     console.print()
 
     table = Table(title="当前生效配置", show_header=True)
@@ -87,6 +103,9 @@ def _handle_show(config_path: Optional[str]) -> None:
     table.add_column("值", style="white")
 
     sections = [
+        ("后端", [
+            ("backend_mode", config.get_backend_mode()),
+        ]),
         ("Agent LLM", [
             ("base_url", config.AGENT_LLM_BASE_URL),
             ("api_key", config.AGENT_LLM_API_KEY[:8] + "***" if len(config.AGENT_LLM_API_KEY) > 8 else config.AGENT_LLM_API_KEY),

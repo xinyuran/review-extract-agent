@@ -53,8 +53,20 @@ class CLISession:
         instance.cli_command = meta.get("cli_command", "resumed")
         instance.result_counter = 0
         instance.history = []
+
+        if getattr(config, "ENABLE_KNOWLEDGE", False):
+            instance.reviewer_id = meta.get("reviewer_id", f"reviewer_{instance.session_id}")
+            instance.product_id = meta.get("product_id", f"product_{instance.session_id}")
+        else:
+            instance.reviewer_id = None
+            instance.product_id = None
+
         instance.agent = ReviewAnalysisAgent(config)
         instance.output_dir = session_dir
+
+        instance._trajectory_recorder = None
+        if getattr(config, "ENABLE_TRAJECTORY", False):
+            instance._init_trajectory_recorder(config)
 
         result_json = session_dir / "result.json"
         if result_json.exists():
@@ -125,7 +137,6 @@ class CLISession:
         output_root: str = DEFAULT_OUTPUT_DIR,
         cli_command: str = "",
     ):
-        # self.session_id: str = secrets.token_hex(4)
         self.session_id: str = f"{secrets.token_hex(4)}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
         self.created_at: datetime = datetime.now()
         self.config: AgentConfig = config
@@ -135,16 +146,67 @@ class CLISession:
         self.result_counter: int = 0
         self.history: List[Dict[str, Any]] = []
 
+        if getattr(config, "ENABLE_KNOWLEDGE", False):
+            self.reviewer_id: Optional[str] = f"reviewer_{self.session_id}"
+            self.product_id: Optional[str] = f"product_{self.session_id}"
+        else:
+            self.reviewer_id = None
+            self.product_id = None
+
         self.agent: ReviewAnalysisAgent = ReviewAnalysisAgent(config)
+
+        self._trajectory_recorder = None
+        if getattr(config, "ENABLE_TRAJECTORY", False):
+            self._init_trajectory_recorder(config)
 
         today = datetime.now().strftime("%Y-%m-%d")
         self.output_dir: Path = Path(output_root) / today / self.session_id
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def analyze(self, text: str) -> Dict[str, Any]:
-        """分析单条评论，返回结果，同时持久化到文件。"""
+    def _init_trajectory_recorder(self, config: AgentConfig) -> None:
+        """初始化轨迹记录器并设置到 Agent 的 LLMService 中"""
+        try:
+            from ..llm_service.trajectory import TrajectoryRecorder
+
+            traj_dir = getattr(config, "TRAJECTORY_OUTPUT_DIR", "extract_agent_output/trajectory")
+            include_thinking = getattr(config, "TRAJECTORY_INCLUDE_THINKING", True)
+
+            self._trajectory_recorder = TrajectoryRecorder(
+                output_dir=traj_dir,
+                session_id=self.session_id,
+                include_thinking=include_thinking,
+            )
+
+            if hasattr(self.agent, "llm_service") and self.agent.llm_service:
+                self.agent.llm_service.set_trajectory_recorder(self._trajectory_recorder)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("轨迹记录器初始化失败: %s", e)
+            self._trajectory_recorder = None
+
+    def analyze(
+        self,
+        text: str,
+        reviewer_id: Optional[str] = None,
+        product_id: Optional[str] = None,
+        product_name: str = "",
+    ) -> Dict[str, Any]:
+        """分析单条评论，返回结果，同时持久化到文件。
+
+        若调用方未显式传入 reviewer_id / product_id，
+        则使用 session 级别自动生成的 ID（仅当 ENABLE_KNOWLEDGE 开启时存在）。
+        """
+        effective_reviewer = reviewer_id or self.reviewer_id
+        effective_product = product_id or self.product_id
+
         use_fast = self.mode == "fast"
-        result = self.agent.run(text, use_fast_path=use_fast)
+        result = self.agent.run(
+            text,
+            use_fast_path=use_fast,
+            reviewer_id=effective_reviewer,
+            product_id=effective_product,
+            product_name=product_name,
+        )
 
         self.result_counter += 1
         self.history.append({
@@ -238,11 +300,14 @@ class CLISession:
                 elif isinstance(k, list) and len(k) >= 2:
                     kw_parts.append(str(k[1]))
             kw_str = ", ".join(kw_parts)
-            sentiment = r.get("sentiment", {})
-            label = "unknown"
-            if isinstance(sentiment, dict):
+            sentiment = r.get("sentiment")
+            if sentiment is None:
+                label = "-"
+            elif isinstance(sentiment, dict):
                 raw_label = sentiment.get("label", "unknown")
                 label = str(raw_label) if not isinstance(raw_label, str) else raw_label
+            else:
+                label = "unknown"
             summaries.append({
                 "index": h["index"],
                 "text_preview": h["text"][:30] + ("..." if len(h["text"]) > 30 else ""),
@@ -267,6 +332,14 @@ class CLISession:
 
     def close(self) -> None:
         """关闭 session，写入 session_meta.json（所有模式都保存）"""
+        if self._trajectory_recorder:
+            try:
+                final_result = self.history[-1]["result"] if self.history else None
+                self._trajectory_recorder.finalize_session(result=final_result)
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("轨迹记录器关闭失败: %s", e)
+
         meta = {
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat(),
@@ -275,6 +348,8 @@ class CLISession:
             "full_output": self.full_output,
             "total_analyzed": self.result_counter,
             "cli_command": self.cli_command,
+            "reviewer_id": self.reviewer_id,
+            "product_id": self.product_id,
             "config_source": getattr(self.config, "_config_source", "默认配置"),
             "history_summary": [
                 {

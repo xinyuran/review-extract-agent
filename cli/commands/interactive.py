@@ -35,6 +35,10 @@ HELP_TEXT = """\
   [cyan]/history[/cyan]           查看当前 session 的分析历史
   [cyan]/session[/cyan]           显示当前 session 信息
   [cyan]/resume[/cyan]            恢复之前保存的 session 继续对话
+  [cyan]/reviewer <id>[/cyan]     查看评论者画像
+  [cyan]/reviewer list[/cyan]     列出所有已追踪的评论者 ID
+  [cyan]/product <id>[/cyan]      查看商品画像
+  [cyan]/product list[/cyan]      列出所有已追踪的商品 ID
   [cyan]/help[/cyan]              显示此帮助
   [cyan]/exit[/cyan]              退出（也可按 Ctrl+D）
 """
@@ -66,10 +70,18 @@ def interactive(
         raise typer.Exit(code=1)
 
     config = load_config(config_path)
+    backend_label = config.get_backend_label()
+    backend_mode = config.get_backend_mode()
+
+    if backend_mode == "offline":
+        mode = "fast"
+
+    knowledge_enabled = getattr(config, "ENABLE_KNOWLEDGE", False)
 
     console.print()
     console.print("[bold cyan]Extract Agent 交互模式[/bold cyan]")
-    console.print(f"[dim]模式: {mode} | 完整输出: {'开' if full else '关'}[/dim]")
+    console.print(f"[dim]后端: {backend_label}[/dim]")
+    console.print(f"[dim]模式: {mode} | 完整输出: {'开' if full else '关'} | 知识积累: {'开' if knowledge_enabled else '关'}[/dim]")
     console.print("[dim]输入评论文本开始分析，输入 /resume 恢复会话，/help 查看帮助，/exit 退出[/dim]")
     console.print()
 
@@ -204,6 +216,12 @@ def _handle_command(command: str, ctx: _ReplContext):
             )
             console.print(f"[dim]模式: {new_session.mode} | "
                           f"完整输出: {'开' if new_session.full_output else '关'}[/dim]")
+
+    elif cmd == "/reviewer":
+        _cmd_reviewer(arg, ctx)
+
+    elif cmd == "/product":
+        _cmd_product(arg, ctx)
 
     else:
         console.print(f"[yellow]未知命令: {cmd}，输入 /help 查看帮助[/yellow]")
@@ -410,6 +428,82 @@ def _cmd_resume(arg: str, ctx: _ReplContext) -> Optional[CLISession]:
     except Exception as e:
         console.print(f"[red]恢复 session 失败: {e}[/red]")
         return None
+
+
+def _get_knowledge_manager(ctx: _ReplContext):
+    from ...knowledge import KnowledgeManager
+    store_dir = getattr(ctx.config, "KNOWLEDGE_STORE_DIR", "extract_agent_output/knowledge_store")
+    return KnowledgeManager(store_dir)
+
+
+def _cmd_reviewer(arg: str, ctx: _ReplContext) -> None:
+    if not arg:
+        console.print("[yellow]用法: /reviewer <id> 或 /reviewer list[/yellow]")
+        return
+
+    try:
+        km = _get_knowledge_manager(ctx)
+
+        if arg.lower() == "list":
+            ids = km.list_reviewers()
+            if not ids:
+                console.print("[dim]暂无已追踪的评论者[/dim]")
+                return
+            table = Table(title="已追踪的评论者", show_header=True)
+            table.add_column("#", width=4, justify="right")
+            table.add_column("Reviewer ID", min_width=20)
+            table.add_column("分析次数", width=10, justify="right")
+            table.add_column("最近更新", width=20)
+            for i, rid in enumerate(ids, 1):
+                profile = km.get_reviewer(rid)
+                total = profile.total_reviews if profile else 0
+                updated = (profile.last_updated or "")[:19] if profile else ""
+                table.add_row(str(i), rid, str(total), updated)
+            console.print()
+            console.print(table)
+            console.print()
+        else:
+            from ...knowledge.reporter import KnowledgeReporter
+            reporter = KnowledgeReporter(km)
+            reporter.report_reviewer(arg)
+    except Exception as e:
+        console.print(f"[red]查看评论者画像失败: {e}[/red]")
+
+
+def _cmd_product(arg: str, ctx: _ReplContext) -> None:
+    if not arg:
+        console.print("[yellow]用法: /product <id> 或 /product list[/yellow]")
+        return
+
+    try:
+        km = _get_knowledge_manager(ctx)
+
+        if arg.lower() == "list":
+            ids = km.list_products()
+            if not ids:
+                console.print("[dim]暂无已追踪的商品[/dim]")
+                return
+            table = Table(title="已追踪的商品", show_header=True)
+            table.add_column("#", width=4, justify="right")
+            table.add_column("Product ID", min_width=20)
+            table.add_column("商品名", max_width=20)
+            table.add_column("评论数", width=10, justify="right")
+            table.add_column("最近更新", width=20)
+            for i, pid in enumerate(ids, 1):
+                profile = km.get_product(pid)
+                name = (profile.product_name or "")[:18] if profile else ""
+                total = profile.total_reviews if profile else 0
+                updated = (profile.last_updated or "")[:19] if profile else ""
+                table.add_row(str(i), pid, name, str(total), updated)
+            console.print()
+            console.print(table)
+            console.print()
+        else:
+            from ...knowledge.reporter import KnowledgeReporter
+            reporter = KnowledgeReporter(km)
+            reporter.report_product(arg)
+    except Exception as e:
+        console.print(f"[red]查看商品画像失败: {e}[/red]")
 
 
 def _cmd_session_info(session: CLISession) -> None:

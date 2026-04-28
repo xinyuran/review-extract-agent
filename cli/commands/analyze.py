@@ -62,6 +62,21 @@ def analyze(
         "-c",
         help="指定配置文件路径",
     ),
+    reviewer_id: Optional[str] = typer.Option(
+        None,
+        "--reviewer-id",
+        help="评论者 ID（启用知识积累追踪）",
+    ),
+    product_id: Optional[str] = typer.Option(
+        None,
+        "--product-id",
+        help="商品 ID（启用知识积累追踪）",
+    ),
+    product_name: Optional[str] = typer.Option(
+        None,
+        "--product-name",
+        help="商品名称（与 --product-id 配合使用）",
+    ),
     debug: bool = typer.Option(
         False,
         "--debug",
@@ -93,6 +108,13 @@ def analyze(
 
     config = load_config(config_path)
 
+    backend_label = config.get_backend_label()
+    backend_mode = config.get_backend_mode()
+    console.print(f"[dim]后端: {backend_label}[/dim]")
+
+    if backend_mode == "offline":
+        mode = "fast"
+
     if no_reflect:
         config.ENABLE_REFLECTION = False
     if debug:
@@ -100,10 +122,16 @@ def analyze(
 
     output_dir = getattr(config, "_cli_output_dir", DEFAULT_OUTPUT_DIR)
 
+    knowledge_ctx = {
+        "reviewer_id": reviewer_id,
+        "product_id": product_id,
+        "product_name": product_name or "",
+    }
+
     if file:
-        _analyze_from_file(file, column, field, mode, full, config, output_dir)
+        _analyze_from_file(file, column, field, mode, full, config, output_dir, knowledge_ctx)
     else:
-        _analyze_single_text(text, mode, full, config, output_dir)
+        _analyze_single_text(text, mode, full, config, output_dir, knowledge_ctx)
 
 
 def _analyze_single_text(
@@ -112,6 +140,7 @@ def _analyze_single_text(
     full: bool,
     config,
     output_dir: str,
+    knowledge_ctx: dict | None = None,
 ) -> None:
     """分析单条文本"""
     cli_cmd = f"analyze \"{text[:20]}...\" --mode {mode}" + (" --full" if full else "")
@@ -122,7 +151,7 @@ def _analyze_single_text(
 
     try:
         with console.status("[bold cyan]正在分析评论...[/bold cyan]"):
-            result = session.analyze(text)
+            result = session.analyze(text, **(knowledge_ctx or {}))
 
         if full:
             format_full_json(result)
@@ -142,6 +171,7 @@ def _analyze_from_file(
     full: bool,
     config,
     output_dir: str,
+    knowledge_ctx: dict | None = None,
 ) -> None:
     """从文件读取并批量分析"""
     try:
@@ -165,7 +195,7 @@ def _analyze_from_file(
         with progress:
             task = progress.add_task("分析进度", total=len(texts))
             for text in texts:
-                result = session.analyze(text)
+                result = session.analyze(text, **(knowledge_ctx or {}))
                 results.append(result)
                 progress.advance(task)
 

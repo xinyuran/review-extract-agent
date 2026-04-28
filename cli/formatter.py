@@ -15,57 +15,59 @@ console = Console()
 
 
 def format_single_result(result: Dict[str, Any], comment: str) -> None:
-    """在终端输出单条评论的简化分析结果"""
+    """在终端输出单条评论的简化分析结果。
 
-    console.print()
-    console.rule(style="bold cyan")
-    console.print(f"[bold]评论:[/bold] {comment}")
-    console.rule(style="bold cyan")
-    console.print()
+    将完整结果拼为一个字符串后单次调用 console.print()，
+    避免逐行 print 在 Windows 终端 + rich Live 上下文后产生重绘鬼影。
+    """
+    lines: list[str] = []
 
     keywords = result.get("keywords", [])
     if keywords:
-        console.print("[bold green]关键词:[/bold green]")
+        lines.append("[bold green]关键词:[/bold green]")
         for i, kw in enumerate(keywords, 1):
             keyword = kw.get("keyword", "")
             score = kw.get("score", 0)
-            console.print(f"   {i}. {keyword} [dim](score: {score})[/dim]")
+            lines.append(f"   {i}. {keyword} [dim](score: {score})[/dim]")
     else:
-        console.print("[bold green]关键词:[/bold green] [dim](无)[/dim]")
+        lines.append("[bold green]关键词:[/bold green] [dim](无)[/dim]")
 
-    console.print()
+    lines.append("")
 
-    sentiment = result.get("sentiment", {})
-    label = sentiment.get("label", "unknown")
-    confidence = sentiment.get("confidence", 0)
-    label_color = {
-        "positive": "green",
-        "negative": "red",
-        "neutral": "yellow",
-    }.get(label, "white")
-    console.print(
-        f"[bold]情感:[/bold] [{label_color}]{label}[/{label_color}] "
-        f"[dim](confidence: {confidence})[/dim]"
-    )
+    sentiment = result.get("sentiment")
+    if sentiment is None:
+        lines.append("[bold]情感:[/bold] [dim](未分析 — 离线模式)[/dim]")
+    elif isinstance(sentiment, dict):
+        label = sentiment.get("label", "unknown")
+        confidence = sentiment.get("confidence", 0)
+        label_color = {
+            "positive": "green",
+            "negative": "red",
+            "neutral": "yellow",
+        }.get(label, "white")
+        lines.append(
+            f"[bold]情感:[/bold] [{label_color}]{label}[/{label_color}] "
+            f"[dim](confidence: {confidence})[/dim]"
+        )
 
-    console.print()
+    lines.append("")
 
     tool_errors = result.get("tool_errors", [])
     for te in tool_errors:
-        console.print(f"[yellow]⚠ {te}[/yellow]")
+        lines.append(f"[yellow]⚠ {te}[/yellow]")
 
     debug_logs = result.get("debug_logs", [])
     for dl in debug_logs:
-        console.print(f"[dim]  → debug 日志: {dl}[/dim]")
+        lines.append(f"[dim]  → debug 日志: {dl}[/dim]")
 
     if tool_errors or debug_logs:
-        console.print()
+        lines.append("")
 
     warnings = result.get("warnings", [])
     for w in warnings:
-        console.print(f"[bold yellow]⚠ {w}[/bold yellow]")
+        lines.append(f"[bold yellow]⚠ {w}[/bold yellow]")
     if warnings:
-        console.print()
+        lines.append("")
 
     errors = [
         t.get("content", "")
@@ -73,16 +75,22 @@ def format_single_result(result: Dict[str, Any], comment: str) -> None:
         if t.get("type") == "error"
     ]
     for err in errors:
-        console.print(f"[bold red]✗ {err}[/bold red]")
+        lines.append(f"[bold red]✗ {err}[/bold red]")
     if errors:
-        console.print()
+        lines.append("")
 
     elapsed = result.get("elapsed_ms", 0)
     mode = result.get("mode", "unknown")
     steps = result.get("steps", "-")
-    console.print(
+    lines.append(
         f"[dim]耗时: {elapsed}ms | 模式: {mode} | 步数: {steps}[/dim]"
     )
+
+    console.print()
+    console.rule(style="bold cyan")
+    console.print(f"[bold]评论:[/bold] {comment}")
+    console.rule(style="bold cyan")
+    console.print("\n".join(lines))
     console.rule(style="bold cyan")
     console.print()
 
@@ -116,13 +124,17 @@ def format_batch_table(results: List[Dict[str, Any]], texts: List[str]) -> None:
         if not kw_str:
             kw_str = "(无)"
 
-        sentiment = result.get("sentiment", {})
-        label = sentiment.get("label", "unknown")
-        label_color = {
-            "positive": "green",
-            "negative": "red",
-            "neutral": "yellow",
-        }.get(label, "white")
+        sentiment = result.get("sentiment")
+        if sentiment is None or not isinstance(sentiment, dict):
+            label = "-"
+            label_color = "dim"
+        else:
+            label = sentiment.get("label", "unknown")
+            label_color = {
+                "positive": "green",
+                "negative": "red",
+                "neutral": "yellow",
+            }.get(label, "white")
 
         elapsed = result.get("elapsed_ms", 0)
         elapsed_str = f"{elapsed / 1000:.1f}s" if elapsed >= 1000 else f"{elapsed:.0f}ms"

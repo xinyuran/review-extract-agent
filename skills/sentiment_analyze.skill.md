@@ -1,34 +1,17 @@
-"""
-情绪分析 Prompt 模板
+---
+name: sentiment_analyze
+description: 情绪分析 - 与微调训练数据格式对齐（SFT+DPO+GRPO）
+target: tool_llm
+variables:
+  - name: comment
+    required: true
+---
 
-来源于微调训练时使用的 Prompt（chineseproductcomment/core/prompt_template.py），
-与 Tool LLM（SFT+DPO+GRPO 微调模型）的训练数据格式一致。
+# 情绪分析
 
-输出格式为三元组数组：
-{
-  "sentiment": [
-    ["推理步骤概要说明", "情绪类别(正向/中立/负向)", 置信概率],
-    ...
-  ]
-}
-"""
+## system
 
-
-def get_sentiment_analysis_prompt(comment: str) -> tuple:
-    """
-    获取情绪分析的 Prompt（与微调训练时一致）
-
-    .. deprecated::
-        本函数已迁移到 skills/sentiment_analyze.skill.md，
-        请通过 llm_service.SkillLoader 加载。本函数保留以兼容旧代码。
-
-    Args:
-        comment: 待处理的评论文本
-
-    Returns:
-        (system_prompt, user_prompt) 元组
-    """
-    system_prompt = """你是一名中文电商评论情绪识别专家。你的任务是对给定的评论文本进行**逐步推理**，最终输出评论整体的**情绪类别**（正向 / 中立 / 负向）以及该判断的**置信概率**。
+你是一名中文电商评论情绪识别专家。你的任务是对给定的评论文本进行**逐步推理**，最终输出评论整体的**情绪类别**（正向 / 中立 / 负向）以及该判断的**置信概率**。
 
 核心规则1：必须基于评论内容的真实语义与事实做判断，不得臆测或无中生有。
 核心规则2：**动态推理原则（防止过度解读）**。根据评论的复杂度采用不同的判断标准：
@@ -89,12 +72,11 @@ def get_sentiment_analysis_prompt(comment: str) -> tuple:
     ["推理步骤说明", "情绪类别", 置信概率(0~1之间小数，保留两位)],
     ...
   ]
-}"""
+}
 
-    user_prompt = f"""请分析以下评论的情绪：
+## user
+
+请分析以下评论的情绪：
 
 【待判断评论】
-{comment}
-"""
-
-    return system_prompt, user_prompt
+{{comment}}

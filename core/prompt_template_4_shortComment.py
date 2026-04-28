@@ -1,10 +1,14 @@
 def get_keyword_extraction_prompt_simple(comment: str) -> str:
     """
     生成精简版关键词提取的 prompt（用于重试兜底）
-    
+
+    .. deprecated::
+        本函数已迁移到 skills/keyword_extract_short.skill.md，
+        请通过 llm_service.SkillLoader 加载。本函数保留以兼容旧代码。
+
     Args:
         comment: 待处理的评论文本
-        
+
     Returns:
         精简的 prompt 字符串
     """

@@ -9,6 +9,8 @@ from .commands.config_cmd import config_command
 from .commands.interactive import interactive
 from .commands.serve import serve
 from .commands.check import check
+from .commands.export import export_app
+from .commands.report import report_app
 
 app = typer.Typer(
     name="extract-agent",
@@ -41,3 +43,6 @@ app.command(
     name="config",
     help="查看或初始化配置文件",
 )(config_command)
+
+app.add_typer(export_app, name="export", help="导出 SFT 训练数据")
+app.add_typer(report_app, name="report", help="知识积累分析报告")

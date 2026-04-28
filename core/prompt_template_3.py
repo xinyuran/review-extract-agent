@@ -1,10 +1,14 @@
 def get_keyword_extraction_prompt_3(comment: str) -> tuple:
     """
     生成关键词提取的 prompt (最终版 V3 - 分离 system 和 user)
-    
+
+    .. deprecated::
+        本函数已迁移到 skills/keyword_extract_long.skill.md，
+        请通过 llm_service.SkillLoader 加载。本函数保留以兼容旧代码。
+
     Args:
         comment: 待处理的评论文本
-        
+
     Returns:
         (system_prompt, user_prompt) 元组
     """

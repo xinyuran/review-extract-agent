@@ -1,72 +1,52 @@
 """
-Agent 系统 Prompt 定义
+Agent Prompt 定义（向后兼容垫片）
 
-定义 ReviewAnalysisAgent 的角色、可用工具使用指南、
-ReAct 范式指导以及终止条件。
+四层架构中 Prompt 已迁移到 skills/ 目录下的 SKILL.md 文件。
+本模块保留 build_tool_descriptions_for_prompt 以兼容外部引用，
+原始字符串常量标记为 deprecated。
+
+新代码请使用 llm_service.SkillLoader 加载技能文件。
 """
 
 import json
+import warnings
 from typing import Dict
 
 from ..tools.base_tool import BaseTool
 
-AGENT_SYSTEM_PROMPT = """你是中文电商评论分析Agent。依次调用工具完成分析，结果由系统自动组装。
 
-## 你的能力
-
-你可以使用以下工具来完成分析任务：
-
-1. **text_preprocess** - 文本预处理：清洗评论文本（去除 URL、emoji、乱码、特殊符号等）
-2. **keyword_extract** - LLM 关键词提取：使用大语言模型从评论中提取结构化关键词（核心工具）
-3. **jieba_extract** - Jieba 兜底提取：当尝试过多次 LLM 提取都失败时，使用 Jieba 分词作为降级方案
-4. **validate_keywords** - 关键词校验：对提取的关键词进行质量校验（停用词过滤、长度检查、原文对齐等）
-5. **sentiment_analyze** - 情感分析：分析评论的情感倾向（正面/负面/中性）
-
-## 工作流程（ReAct 范式）
-
-你必须严格遵循 ReAct 的 Thought → Action → Observation 循环，每一步你都需要：
-1. **Thought**：先用自然语言分析当前状态和已有结果，判断是否存在质量问题，决定下一步做什么
-2. **Action**：调用合适的工具
-3. **Observation**：观察工具返回的结果
-
-**重要规则：**
-- 每次调用工具前必须先输出 Thought，说明你的推理过程
-- 每次拿到工具结果后，必须认真审查结果质量，再决定下一步
-- 如果发现结果有问题（如关键词重复、数量不足、质量不佳），你应该重新调用相关工具来修正，而不是带着有问题的结果继续往下走
-
-### 典型分析流程
-
-以下是一个**参考流程**，但你不需要机械地按顺序走一遍。你应该根据每步的实际结果灵活决策：
-
-- 用 `text_preprocess` 清洗原始评论
-- 用 `keyword_extract` 提取关键词
-- 如果 `keyword_extract` 失败或为空 → 用 `jieba_extract` 兜底
-- 用 `validate_keywords` 校验和去重 → **审查结果**：如果关键词仍有问题，可以重新提取或重新校验
-- 用 `sentiment_analyze` 分析情感
-- 确认所有结果质量合格后，输出最终总结
-
-### 质量要求
-
-- 最终的关键词列表不应有重复
-- 每个关键词应能在原文中找到依据
-- 关键词数量应与评论内容的丰富度匹配
-
-## 终止条件
-
-当你确认以下条件都满足时，才用自然语言输出最终分析总结：
-1. 关键词提取已完成，且结果质量合格（无重复、无明显遗漏）
-2. 情感分析已完成
-你不需要输出 JSON 格式的结构化数据——工具返回的结果会由系统自动组装。
-"""
-
-USER_REQUEST_TEMPLATE = """分析此评论：{comment}"""
+def _load_skill_text(skill_name: str, section: str = "system") -> str:
+    """从 SKILL.md 加载指定段落（运行时使用）"""
+    try:
+        from ..llm_service.skill_loader import SkillLoader
+        loader = SkillLoader()
+        raw = loader._cache.get(skill_name)
+        if raw:
+            return getattr(raw, section, "")
+    except Exception:
+        pass
+    return ""
 
 
-BATCH_USER_REQUEST_TEMPLATE = """请逐条分析以下 {count} 条电商评论：
+def _deprecated_prompt(name: str) -> str:
+    warnings.warn(
+        f"{name} 已弃用，请使用 SkillLoader 加载对应的 SKILL.md 文件",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return ""
 
-{comments}
 
-请对每条评论按照标准流程完成完整的分析（关键词提取 + 情感分析），并返回所有结果。"""
+AGENT_SYSTEM_PROMPT = _load_skill_text("agent_system", "system") or (
+    "你是中文电商评论分析Agent。依次调用工具完成分析，结果由系统自动组装。"
+)
+
+USER_REQUEST_TEMPLATE = "分析此评论：{comment}"
+
+BATCH_USER_REQUEST_TEMPLATE = (
+    "请逐条分析以下 {count} 条电商评论：\n\n{comments}\n\n"
+    "请对每条评论按照标准流程完成完整的分析（关键词提取 + 情感分析），并返回所有结果。"
+)
 
 AGENT_SYSTEM_PROMPT_WITH_TOOLS = (
     AGENT_SYSTEM_PROMPT
