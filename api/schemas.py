@@ -55,6 +55,9 @@ class AnalyzeSingleRequest(BaseModel):
     enable_reflection: Optional[bool] = Field(
         default=None, description="是否启用反思（None 则使用全局配置）"
     )
+    reviewer_id: Optional[str] = Field(default=None, description="评论者 ID（用于知识积累）")
+    product_id: Optional[str] = Field(default=None, description="商品 ID（用于知识积累）")
+    product_name: str = Field(default="", description="商品名称（用于知识积累）")
 
 
 class AnalyzeSingleResponse(BaseModel):

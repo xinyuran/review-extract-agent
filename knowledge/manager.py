@@ -9,9 +9,16 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    from filelock import FileLock
+    _HAS_FILELOCK = True
+except ImportError:
+    _HAS_FILELOCK = False
 
 from .models import ReviewerProfile, ProductProfile
 
@@ -35,6 +42,7 @@ class KnowledgeManager:
     知识积累管理器
 
     按 knowledge_store/{reviewers,products}/{id}.json 组织目录结构。
+    并发写入通过 filelock 保护（若已安装）。
     """
 
     def __init__(self, store_dir: str = "extract_agent_output/knowledge_store"):
@@ -45,6 +53,16 @@ class KnowledgeManager:
         self._reviewers_dir.mkdir(parents=True, exist_ok=True)
         self._products_dir.mkdir(parents=True, exist_ok=True)
 
+    @contextmanager
+    def _file_lock(self, path: Path):
+        """获取文件锁（需 filelock 库，未安装则跳过）"""
+        if _HAS_FILELOCK:
+            lock = FileLock(str(path) + ".lock", timeout=10)
+            with lock:
+                yield
+        else:
+            yield
+
     # ------------------------------------------------------------------
     # 评论者画像 (Reviewer Profile)
     # ------------------------------------------------------------------
@@ -54,7 +72,8 @@ class KnowledgeManager:
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            with self._file_lock(path):
+                data = json.loads(path.read_text(encoding="utf-8"))
             return ReviewerProfile.from_dict(data)
         except Exception as e:
             logger.warning("加载评论者画像失败 %s: %s", reviewer_id, e)
@@ -62,10 +81,11 @@ class KnowledgeManager:
 
     def save_reviewer(self, profile: ReviewerProfile) -> None:
         path = self._reviewers_dir / f"{profile.reviewer_id}.json"
-        path.write_text(
-            json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._file_lock(path):
+            path.write_text(
+                json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     def update_reviewer(
         self, reviewer_id: str, analysis_result: Dict[str, Any]
@@ -133,7 +153,8 @@ class KnowledgeManager:
         if not path.exists():
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            with self._file_lock(path):
+                data = json.loads(path.read_text(encoding="utf-8"))
             return ProductProfile.from_dict(data)
         except Exception as e:
             logger.warning("加载商品画像失败 %s: %s", product_id, e)
@@ -141,10 +162,11 @@ class KnowledgeManager:
 
     def save_product(self, profile: ProductProfile) -> None:
         path = self._products_dir / f"{profile.product_id}.json"
-        path.write_text(
-            json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._file_lock(path):
+            path.write_text(
+                json.dumps(profile.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     def update_product(
         self,

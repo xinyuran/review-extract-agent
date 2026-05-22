@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from openai import OpenAI
 
 from ..config import AgentConfig
-from .models import LLMResponse, SkillPrompt
+from .models import LLMResponse, LLMStreamChunk, SkillPrompt
 from .skill_loader import SkillLoader
 
 logger = logging.getLogger(__name__)
@@ -132,6 +132,68 @@ class LLMService:
             )
 
         return llm_resp
+
+    # ------------------------------------------------------------------
+    # Agent LLM 流式调用
+    # ------------------------------------------------------------------
+
+    def call_agent_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[str] = None,
+    ):
+        """
+        流式调用 Agent LLM，逐 chunk yield LLMStreamChunk。
+
+        流结束后额外 yield 一个 finish_reason 非 None 的终止 chunk。
+        调用方可通过累积 delta_content 拼接完整响应，
+        或通过 tool_call 相关字段累积工具调用参数。
+        """
+        if self._agent_client is None:
+            raise RuntimeError("Agent LLM client not initialized (offline mode)")
+
+        cfg = self.config
+        kwargs: Dict[str, Any] = {
+            "model": cfg.AGENT_LLM_MODEL,
+            "messages": messages,
+            "max_tokens": cfg.AGENT_LLM_MAX_TOKENS,
+            "temperature": cfg.AGENT_LLM_TEMPERATURE,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if tool_choice:
+            kwargs["tool_choice"] = tool_choice
+
+        stream = self._agent_client.chat.completions.create(**kwargs)
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            sc = LLMStreamChunk(
+                finish_reason=choice.finish_reason,
+                model=chunk.model,
+            )
+
+            if delta.content:
+                sc.delta_content = delta.content
+
+            if delta.tool_calls:
+                tc = delta.tool_calls[0]
+                sc.tool_call_index = tc.index
+                if tc.id:
+                    sc.tool_call_id = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        sc.tool_call_function_name = tc.function.name
+                    if tc.function.arguments:
+                        sc.tool_call_function_args_delta = tc.function.arguments
+
+            yield sc
 
     # ------------------------------------------------------------------
     # Tool LLM 调用

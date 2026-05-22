@@ -15,6 +15,7 @@ import redis.asyncio as aioredis
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "").strip() or None
 TASK_KEY_PREFIX = "extract_agent:task:"
 RESULT_KEY_PREFIX = "extract_agent:result:"
 TASK_QUEUE_KEY = "extract_agent:queue"
@@ -31,18 +32,21 @@ class RedisManager:
     - 结果缓存（TTL 自动过期）
     """
 
-    def __init__(self, redis_url: str = REDIS_URL):
+    def __init__(self, redis_url: str = REDIS_URL, password: Optional[str] = REDIS_PASSWORD):
         self._redis_url = redis_url
+        self._password = password
         self._redis: Optional[aioredis.Redis] = None
 
     async def connect(self) -> None:
         if self._redis is None:
-            self._redis = aioredis.from_url(
-                self._redis_url,
-                decode_responses=True,
-                max_connections=20,
-            )
-            logger.info(f"Redis 连接已建立: {self._redis_url}")
+            kwargs: Dict[str, Any] = {
+                "decode_responses": True,
+                "max_connections": 20,
+            }
+            if self._password:
+                kwargs["password"] = self._password
+            self._redis = aioredis.from_url(self._redis_url, **kwargs)
+            logger.info("Redis 连接已建立: %s", self._redis_url)
 
     async def disconnect(self) -> None:
         if self._redis:

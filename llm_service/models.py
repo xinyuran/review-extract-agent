@@ -35,3 +35,16 @@ class LLMResponse:
     @property
     def has_tool_calls(self) -> bool:
         return bool(self.tool_calls)
+
+
+@dataclass
+class LLMStreamChunk:
+    """流式 LLM 调用中的单个 chunk"""
+
+    delta_content: Optional[str] = None
+    tool_call_index: Optional[int] = None
+    tool_call_id: Optional[str] = None
+    tool_call_function_name: Optional[str] = None
+    tool_call_function_args_delta: Optional[str] = None
+    finish_reason: Optional[str] = None
+    model: Optional[str] = None

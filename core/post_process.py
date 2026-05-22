@@ -1,441 +1,42 @@
-# 关键词后处理模块
-# 用于对模型返回的关键词进行去重、排序、过滤等操作
+"""
+关键词后处理主入口
 
-import os
-import re
+提供 post_process_keywords() / post_process_keywords_with_config() / 
+extract_keywords_from_json() / normalize_keywords_data() 四个对外 API，
+内部组合 filters 子模块完成去重、停用词过滤、长度过滤、原文对齐等。
+"""
+
 import logging
+import re
 
+from .filters import (
+    find_min_span_in_text,
+    validate_keyword_chars_in_text,
+    filter_keywords_not_in_original,
+    load_stopwords,
+    is_date_keyword,
+    is_time_keyword,
+    deduplicate_keywords,
+    filter_by_length,
+    filter_english,
+    CHINESE_NUM_PATTERN,
+    ARABIC_NUM_PATTERN,
+    ANY_NUM_PATTERN,
+)
 
-# 停用词缓存字典：{文件路径: 停用词集合}
-_stopwords_cache = {}
-
-
-def find_min_span_in_text(keyword, original_text):
-    """
-    在原始文本中找到能匹配关键词所有字符的最小连续范围
-    
-    使用贪婪算法：从关键词第一个字符在原文中的每个出现位置开始，
-    依次向后查找剩余字符，计算匹配所需的最小范围。
-    
-    Args:
-        keyword: 待匹配的关键词
-        original_text: 原始文本
-        
-    Returns:
-        最小匹配范围的长度，如果无法匹配则返回 -1
-    """
-    if not keyword or not original_text:
-        return -1
-    
-    # 过滤掉关键词中的空格
-    keyword_chars = [c for c in keyword if c != ' ']
-    if not keyword_chars:
-        return -1
-    
-    min_span = float('inf')
-    
-    # 找到第一个字符在原文中的所有位置
-    first_char = keyword_chars[0]
-    start_positions = [i for i, c in enumerate(original_text) if c == first_char]
-    
-    # 对于每个起始位置，尝试贪婪匹配
-    for start_pos in start_positions:
-        current_pos = start_pos
-        matched = True
-        
-        # 依次匹配剩余字符
-        for i, char in enumerate(keyword_chars):
-            if i == 0:
-                continue  # 第一个字符已经匹配
-            
-            # 从当前位置向后查找下一个字符
-            found = False
-            for j in range(current_pos + 1, len(original_text)):
-                if original_text[j] == char:
-                    current_pos = j
-                    found = True
-                    break
-            
-            if not found:
-                matched = False
-                break
-        
-        if matched:
-            # 计算这次匹配的范围（从起始位置到最后匹配位置）
-            span = current_pos - start_pos + 1
-            min_span = min(min_span, span)
-    
-    return min_span if min_span != float('inf') else -1
-
-
-def validate_keyword_chars_in_text(keyword, original_text, max_span_ratio=2):
-    """
-    验证关键词中的每个字符是否都在原始文本中紧凑地存在
-    
-    该函数用于过滤掉模型"自行推理总结"产生的、原文中不存在的关键词。
-    
-    验证规则：
-    1. 关键词的每个字符都必须在原文中存在
-    2. 这些字符在原文中的最小匹配范围不能超过关键词长度的 max_span_ratio 倍
-    
-    例如（假设 max_span_ratio=2）：
-    - 原文"已经退货"，关键词"没退货" → 无效（"没"不在原文中）
-    - 原文"衣服不怎么粘肉"，关键词"不粘肉" → 有效（范围5，关键词长度3，比例1.67<2）
-    - 原文"聊个不停...一天"，关键词"聊天" → 无效（字符散落太远，范围远超2倍）
-    
-    Args:
-        keyword: 待验证的关键词
-        original_text: 原始文本（建议传入预处理后的文本）
-        max_span_ratio: 最大跨度倍数（默认为2，即匹配范围不超过关键词长度的2倍）
-        
-    Returns:
-        True 如果关键词验证通过，否则 False
-    """
-    if not isinstance(keyword, str) or not isinstance(original_text, str):
-        return False
-    
-    if not keyword or not original_text:
-        return False
-    
-    # 过滤掉关键词中的空格
-    keyword_chars = [c for c in keyword if c != ' ']
-    if not keyword_chars:
-        return False
-    
-    keyword_len = len(keyword_chars)
-    
-    # 1. 首先检查每个字符是否都在原文中存在
-    original_chars = set(original_text)
-    for char in keyword_chars:
-        if char not in original_chars:
-            return False
-    
-    # 2. 检查字符在原文中的紧凑性（最小匹配范围）
-    min_span = find_min_span_in_text(keyword, original_text)
-    
-    if min_span < 0:
-        # 无法找到匹配，说明字符顺序不对或不存在
-        return False
-    
-    # 计算允许的最大范围
-    max_allowed_span = keyword_len * max_span_ratio
-    
-    if min_span > max_allowed_span:
-        logging.debug(f"[原文验证] 关键词'{keyword}'跨度过大: 最小范围={min_span}, 允许最大={max_allowed_span}")
-        return False
-    
-    return True
-
-
-def filter_keywords_not_in_original(keywords_data, original_text, keyword_idx=1, max_span_ratio=2):
-    """
-    过滤掉不在原始文本中的关键词
-    
-    遍历关键词列表，检查每个关键词的所有字符是否都在原始文本中紧凑地存在，
-    过滤掉包含原文中不存在字符的关键词，以及字符散落过远的拼凑关键词。
-    
-    Args:
-        keywords_data: 关键词数据列表，格式为 [[推理, 关键词, 分数], ...]
-        original_text: 原始文本（建议传入预处理后的文本）
-        keyword_idx: 关键词在列表中的索引位置（新格式为1，旧格式为0）
-        max_span_ratio: 最大跨度倍数（默认为2，即匹配范围不超过关键词长度的2倍）
-        
-    Returns:
-        过滤后的关键词数据列表
-    """
-    if not keywords_data or not original_text:
-        return keywords_data
-    
-    filtered_data = []
-    filtered_out = []  # 记录被过滤的关键词（用于调试）
-    
-    for item in keywords_data:
-        if len(item) > keyword_idx:
-            keyword = item[keyword_idx]
-            
-            # 确保关键词是字符串类型
-            if not isinstance(keyword, str):
-                continue
-            
-            # 验证关键词中的每个字符是否都在原文中紧凑地存在
-            if validate_keyword_chars_in_text(keyword, original_text, max_span_ratio):
-                filtered_data.append(item)
-            else:
-                filtered_out.append(keyword)
-    
-    # 调试输出
-    if filtered_out:
-        logging.info(f"[原文验证过滤] 过滤前: {len(keywords_data)} 个, 过滤后: {len(filtered_data)} 个, 被过滤: {filtered_out}")
-    
-    return filtered_data
-
-
-
-# ==================== 通用中文数字模式 ====================
-# 包含：零一二三四五六七八九十百千万亿（简体）
-#       壹贰叁肆伍陆柒捌玖拾佰仟萬億（繁体/大写）
-#       〇两（特殊数字）
-CHINESE_NUM_PATTERN = r'[零〇一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟萬億两]+'
-# 阿拉伯数字模式
-ARABIC_NUM_PATTERN = r'\d+'
-# 任意数字模式（中文或阿拉伯数字）
-ANY_NUM_PATTERN = f'(?:{CHINESE_NUM_PATTERN}|{ARABIC_NUM_PATTERN})'
-
-
-def is_date_keyword(keyword):
-    """
-    判断关键词是否为日期相关词汇
-    
-    检测规则：
-    - 年份：2024年、二零二四年、二千零二十四年
-    - 月份：1月、一月、01月
-    - 日期：1号、一号、01号、1日、一日
-    - 完整日期：5月15、五月十五号、2024年11月
-    - 星期：周一、星期一、礼拜一
-    - 相对日期：今天、昨天、明天、前天、后天
-    
-    Args:
-        keyword: 待检测的关键词
-        
-    Returns:
-        True 如果是日期关键词，否则 False
-    """
-    if not isinstance(keyword, str):
-        return False
-    
-    # ===== 1. 年份检测 =====
-    
-    # 1.1 数字年份：2024年、24年、任意数字+年
-    if re.search(ARABIC_NUM_PATTERN + r'\s*年', keyword):
-        return True
-    
-    # 1.2 中文年份：二零二四年、二〇二四年、二千零二十四年
-    if re.search(CHINESE_NUM_PATTERN + r'\s*年', keyword):
-        return True
-    
-    # ===== 2. 月份检测 =====
-    
-    # 2.1 数字月份：1月、01月、12月
-    if re.search(ARABIC_NUM_PATTERN + r'\s*月', keyword):
-        return True
-    
-    # 2.2 中文月份：一月、十二月、任意中文数字+月
-    if re.search(CHINESE_NUM_PATTERN + r'\s*月', keyword):
-        return True
-    
-    # ===== 3. 日期检测 =====
-    
-    # 3.1 数字日期：1号、01号、1日、01日
-    if re.search(ARABIC_NUM_PATTERN + r'\s*[号日]', keyword):
-        return True
-    
-    # 3.2 中文日期：一号、二十七号、三十一日
-    if re.search(CHINESE_NUM_PATTERN + r'\s*[号日]', keyword):
-        return True
-    
-    # 3.3 只有"号"字（在特定上下文中）
-    if keyword == '号' or keyword == '日':
-        return True
-    
-    # ===== 4. 完整日期格式 =====
-    
-    # 4.1 月日组合：5月15、11.15、11-15、11/15
-    if re.search(ARABIC_NUM_PATTERN + r'\s*月\s*' + ARABIC_NUM_PATTERN, keyword):
-        return True
-    if re.search(r'\d{1,2}[\./-]\d{1,2}', keyword):
-        return True
-    
-    # 4.2 中文月日组合：五月十五
-    if re.search(CHINESE_NUM_PATTERN + r'\s*月\s*' + CHINESE_NUM_PATTERN, keyword):
-        return True
-    
-    # 4.3 年月日组合：2024年11月15日
-    if re.search(ANY_NUM_PATTERN + r'\s*年\s*' + ANY_NUM_PATTERN + r'\s*月\s*' + ANY_NUM_PATTERN + r'\s*[日号]?', keyword):
-        return True
-    
-    # ===== 5. 星期检测 =====
-    
-    # 5.1 星期：周X、星期X、礼拜X（使用通用模式）
-    if re.search(r'周[一二三四五六日天]', keyword):
-        return True
-    if re.search(r'星期[一二三四五六日天]', keyword):
-        return True
-    if re.search(r'礼拜[一二三四五六日天]', keyword):
-        return True
-    
-    # 5.2 工作日、周末
-    if '工作日' in keyword or '周末' in keyword or '双休' in keyword:
-        return True
-    
-    # ===== 6. 相对日期 =====
-    
-    relative_dates = [
-        '今天', '今日', '今儿',
-        '昨天', '昨日', '昨儿',
-        '明天', '明日', '明儿',
-        '前天', '前日',
-        '后天', '后日',
-        '大前天', '大后天'
-    ]
-    for date in relative_dates:
-        if date in keyword:
-            return True
-    
-    # ===== 7. 其他日期表达 =====
-    
-    # 7.1 月初、月中、月末、月底
-    if re.search(r'月[初中末底]', keyword):
-        return True
-    
-    # 7.2 上旬、中旬、下旬
-    if '旬' in keyword and any(x in keyword for x in ['上', '中', '下']):
-        return True
-    
-    # 7.3 季度：任意数字+季度、Q+数字
-    if re.search(r'第?' + ANY_NUM_PATTERN + r'\s*季度', keyword):
-        return True
-    if re.search(r'[Qq]' + ARABIC_NUM_PATTERN, keyword):
-        return True
-    
-    return False
-
-
-def is_time_keyword(keyword):
-    """
-    判断关键词是否为时间相关词汇
-    
-    使用与预处理阶段相同的检测规则，确保一致性。
-    
-    检测规则（与 preprocess_v2.py 中的 remove_time_expressions 保持一致）：
-    - 标准时间格式：8:40、08:40:30、8.40、8点40分30秒
-    - 口语化时间：8点多、8点半、8点左右、差5分8点
-    - 时间段：早上、上午、中午、下午、晚上、凌晨、夜里
-    - 模糊时间：刚才、现在、马上、立刻、稍后
-    
-    Args:
-        keyword: 待检测的关键词
-        
-    Returns:
-        True 如果是时间关键词，否则 False
-    """
-    if not isinstance(keyword, str):
-        return False
-    
-    # ===== 1. 标准时间格式 =====
-    
-    # 1.1 冒号分隔的时间：8:40、08:40:30、23:59:59
-    if re.search(r'\d{1,2}:\d{1,2}(:\d{1,2})?', keyword):
-        return True
-    
-    # 1.2 点号分隔的时间：8.40、8.40.30（排除价格）
-    if re.search(r'(?<!\d)\d{1,2}\.\d{1,2}(\.\d{1,2})?(?!\d)', keyword):
-        return True
-    
-    # 1.3 中文完整时间：8点40分30秒、8点40分、8点40、八点四十分（统一使用通用数字模式）
-    if re.search(ANY_NUM_PATTERN + r'\s*点\s*' + ANY_NUM_PATTERN + r'\s*分\s*' + ANY_NUM_PATTERN + r'\s*秒', keyword):
-        return True
-    if re.search(ANY_NUM_PATTERN + r'\s*点\s*' + ANY_NUM_PATTERN + r'\s*分', keyword):
-        return True
-    if re.search(ANY_NUM_PATTERN + r'\s*点\s*' + ANY_NUM_PATTERN + r'(?![分秒])', keyword):
-        return True
-    
-    # 1.4 中文时间单位：8点、40分、30秒、8时、40分钟（数字或中文数字）
-    if re.search(ANY_NUM_PATTERN + r'\s*[点时]\s*(?:钟)?', keyword):
-        return True
-    if re.search(ANY_NUM_PATTERN + r'\s*分\s*(?:钟)?', keyword):
-        return True
-    if re.search(ANY_NUM_PATTERN + r'\s*秒\s*(?:钟)?', keyword):
-        return True
-    
-    # ===== 2. 口语化时间表达 =====
-    
-    # 2.1 模糊时间：8点多、8点半、8点左右、8点钟左右（数字或中文数字）
-    if re.search(ANY_NUM_PATTERN + r'\s*[点时]\s*[多半来钟]', keyword):
-        return True
-    if re.search(ANY_NUM_PATTERN + r'\s*[点时]\s*(?:左右|上下)', keyword):
-        return True
-    
-    # 2.2 差几分几点：差5分8点、差一刻9点（数字或中文数字）
-    if re.search(r'差\s*' + ANY_NUM_PATTERN + r'\s*分\s*' + ANY_NUM_PATTERN + r'\s*[点时]', keyword):
-        return True
-    if re.search(r'差\s*' + CHINESE_NUM_PATTERN + r'\s*刻\s*' + ANY_NUM_PATTERN + r'\s*[点时]', keyword):
-        return True
-    
-    # 2.3 几点几刻：8点一刻、9点三刻（数字或中文数字）
-    if re.search(ANY_NUM_PATTERN + r'\s*[点时]\s*' + CHINESE_NUM_PATTERN + r'\s*刻', keyword):
-        return True
-    
-    # ===== 3. 时间段表达 =====
-    
-    # 3.1 时间段：早上、上午、中午、下午、晚上、夜里、凌晨、深夜
-    time_periods = ['早上', '上午', '中午', '下午', '晚上', '夜里', '凌晨', '深夜', '早晨', '傍晚', '黄昏']
-    for period in time_periods:
-        if period in keyword:
-            return True
-    
-    # 3.2 带时间段的完整表达：上午8点、晚上9点半（数字或中文数字）
-    if re.search(r'[早上中下晚夜凌深][上午里晨间夜]\s*' + ANY_NUM_PATTERN + r'\s*[点时]', keyword):
-        return True
-    
-    # ===== 4. 模糊时间词 =====
-    
-    fuzzy_time_words = [
-        '刚才', '刚刚', '现在', '此刻', '当前', '目前',
-        '马上', '立刻', '立即', '立马', '即刻',
-        '稍后', '待会', '一会儿', '过会', '等会',
-        '随后', '之后', '然后', '接着', '紧接着'
-    ]
-    for word in fuzzy_time_words:
-        if word in keyword:
-            return True
-    
-    return False
-
-
-def load_stopwords(stopwords_file="stopwords.txt"):
-    """
-    从文件加载停用词列表（带缓存机制，避免重复加载）
-    
-    Args:
-        stopwords_file: 停用词文件路径（默认为当前目录下的 stopwords.txt）
-        
-    Returns:
-        停用词集合（set）
-    """
-    # 如果提供的是相对路径，则相对于当前脚本所在目录
-    if not os.path.isabs(stopwords_file):
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        stopwords_file = os.path.join(script_dir, stopwords_file)
-    
-    # 检查缓存中是否已经加载过该文件
-    if stopwords_file in _stopwords_cache:
-        return _stopwords_cache[stopwords_file]
-    
-    # 首次加载
-    stopwords = set()
-    
-    # 检查文件是否存在
-    if not os.path.exists(stopwords_file):
-        logging.warning(f"停用词文件不存在: {stopwords_file}")
-        _stopwords_cache[stopwords_file] = stopwords
-        return stopwords
-    
-    try:
-        with open(stopwords_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                # 去除首尾空白字符
-                word = line.strip()
-                # 跳过空行和注释行
-                if word and not word.startswith('#'):
-                    stopwords.add(word)
-        logging.info(f"成功加载 {len(stopwords)} 个停用词（来自: {os.path.basename(stopwords_file)}）")
-        # 缓存结果
-        _stopwords_cache[stopwords_file] = stopwords
-    except Exception as e:
-        logging.error(f"加载停用词文件失败: {e}")
-        _stopwords_cache[stopwords_file] = stopwords
-    
-    return stopwords
+# Re-export for backward compatibility
+__all__ = [
+    "post_process_keywords",
+    "post_process_keywords_with_config",
+    "extract_keywords_from_json",
+    "normalize_keywords_data",
+    "find_min_span_in_text",
+    "validate_keyword_chars_in_text",
+    "filter_keywords_not_in_original",
+    "load_stopwords",
+    "is_date_keyword",
+    "is_time_keyword",
+]
 
 
 def normalize_keywords_data(keywords_data, json_format="new"):
@@ -614,16 +215,7 @@ def post_process_keywords(
     
     # 2. 去重（如果启用）
     if deduplicate:
-        seen_keywords = set()
-        deduplicated_data = []
-        for item in processed_data:
-            if len(item) > keyword_idx:
-                keyword = item[keyword_idx]
-                # 只保留第一次出现的关键词（由于已排序，保留的是分数最高的）
-                if keyword not in seen_keywords:
-                    seen_keywords.add(keyword)
-                    deduplicated_data.append(item)
-        processed_data = deduplicated_data
+        processed_data = deduplicate_keywords(processed_data, keyword_idx=keyword_idx)
     
     # 3. 过滤低分词（如果启用）
     if filter_low_score:
@@ -644,17 +236,7 @@ def post_process_keywords(
     
     # 5. 去除包含英文字母的关键词（如果启用）
     if remove_english:
-        filtered_data = []
-        for item in processed_data:
-            if len(item) > keyword_idx:
-                keyword = item[keyword_idx]
-                # 确保关键词是字符串类型
-                if not isinstance(keyword, str):
-                    continue  # 跳过非字符串类型的关键词
-                # 检查关键词中是否包含英文字母
-                if not re.search(r'[a-zA-Z]', keyword):
-                    filtered_data.append(item)
-        processed_data = filtered_data
+        processed_data = filter_english(processed_data, keyword_idx=keyword_idx)
     
     # 6. 过滤停用词（如果启用）
     if filter_stopwords and (stopwords_exact_match or stopwords_contain_match):
@@ -857,3 +439,52 @@ def extract_keywords_from_json(keywords_json, return_raw=False):
     
     return keywords_data
 
+
+def post_process_keywords_with_config(
+    keywords_data,
+    config,
+    original_text=None,
+    max_keywords=None,
+    json_format="new",
+):
+    """
+    使用 PostprocessConfig（或 AgentConfig）驱动后处理，减少调用方参数传递。
+
+    Args:
+        keywords_data: 原始关键词数据
+        config: PostprocessConfig 或 AgentConfig 实例
+        original_text: 原文文本（用于原文对齐校验）
+        max_keywords: 覆盖 config.n 的最大关键词数
+        json_format: JSON 格式类型
+    """
+    from ..config import PostprocessConfig
+
+    if isinstance(config, PostprocessConfig):
+        pp = config
+    else:
+        pp = getattr(config, "postprocess", config)
+
+    return post_process_keywords(
+        keywords_data,
+        deduplicate=pp.deduplicate,
+        sort_by_importance=pp.sort_by_importance,
+        filter_low_score=pp.filter_low_score,
+        score_threshold=pp.score_threshold,
+        top_n=pp.top_n,
+        n=max_keywords if max_keywords is not None else pp.n,
+        return_full_info=pp.return_full_info,
+        json_format=json_format,
+        remove_english=pp.remove_english,
+        filter_stopwords=pp.filter_stopwords,
+        stopwords_exact_match=pp.stopwords_exact_match,
+        stopwords_contain_match=pp.stopwords_contain_match,
+        stopwords_file=pp.stopwords_file,
+        filter_time_keywords=pp.filter_time_keywords,
+        filter_date_keywords=pp.filter_date_keywords,
+        filter_long_keywords=pp.filter_long_keywords,
+        max_keyword_length=pp.max_keyword_length,
+        backfill_topn=pp.backfill_topn,
+        filter_not_in_original=pp.filter_not_in_original,
+        original_text=original_text,
+        max_span_ratio=pp.max_span_ratio,
+    )

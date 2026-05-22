@@ -1,3 +1,5 @@
+[English](README_EN.md) | 中文
+
 # Extract Agent — 中文电商评论分析 AI Agent
 
 基于 ReAct（Thought → Action → Observation）范式的评论分析 Agent，具备**自主规划、迭代式工具调用、代码级反思、异常降级**能力。采用**四层架构**（Skill → Agent → LLM Service → Tool），支持**轨迹数据采集与 SFT 导出**、**知识积累**和**多种使用方式**（Python API / FastAPI HTTP / 交互式 CLI）。
@@ -79,7 +81,9 @@ extract_agent/
 │
 ├── agent/                          # ② Agent 层 — ReAct 主循环
 │   ├── agent.py                    # ReviewAnalysisAgent + 知识积累集成
-│   ├── prompts.py                  # 兼容垫片（已迁移至 SKILL.md）
+│   ├── react_loop.py               # ReAct 循环执行器（native / prompt-based / 流式）
+│   ├── fast_path.py                # 管线式快速分析（offline / fast）
+│   ├── result_assembler.py         # 从 Memory 组装结构化结果
 │   ├── memory.py                   # 工作记忆管理
 │   └── reflector.py                # LLM 反思器
 │
@@ -98,14 +102,20 @@ extract_agent/
 │   └── sentiment_tool.py           # 情感分析工具
 │
 ├── core/                           # 底层能力模块
-│   ├── preprocess.py               # 文本预处理
-│   ├── post_process.py             # 关键词后处理
+│   ├── preprocess.py               # 文本预处理（主入口，组合 cleaners 子模块）
+│   ├── post_process.py             # 关键词后处理（主入口，组合 filters 子模块）
 │   ├── fallback_extractor.py       # Jieba 兜底提取
-│   ├── prompt_template_3.py        # 关键词提取 Prompt（已迁移至 SKILL.md）
-│   ├── prompt_template_4_shortComment.py  # 短评 Prompt（已迁移至 SKILL.md）
-│   ├── sentiment_prompt.py         # 情感分析 Prompt（已迁移至 SKILL.md）
-│   ├── reflector_prompt.py         # 反思器 Prompt（已迁移至 SKILL.md）
-│   └── stopwords.txt               # 停用词表
+│   ├── stopwords.txt               # 停用词表
+│   ├── cleaners/                   # 文本清洗子模块
+│   │   ├── time_cleaner.py         # 时间/日期表达式去除
+│   │   ├── url_cleaner.py          # URL/邮箱/手机号清除
+│   │   ├── emoji_cleaner.py        # Emoji/乱码/特殊符号处理
+│   │   └── normalize.py            # Unicode 规范化、全角半角转换
+│   └── filters/                    # 关键词过滤子模块
+│       ├── text_alignment.py       # 原文对齐检查
+│       ├── stopwords.py            # 停用词过滤
+│       ├── dedup.py                # 关键词去重
+│       └── length_filter.py        # 长度/英文过滤
 │
 ├── trajectory/                     # 轨迹数据导出
 │   ├── exporter.py                 # TrajectoryExporter（加载 session → 导出 SFT）
@@ -120,6 +130,7 @@ extract_agent/
 │   ├── app.py                      # FastAPI 应用入口
 │   ├── routes.py                   # 路由定义
 │   ├── schemas.py                  # 请求/响应 Pydantic 模型
+│   ├── metrics.py                  # Prometheus 指标定义与中间件
 │   └── redis_client.py             # Redis 客户端封装
 │
 ├── cli/                            # 命令行界面
@@ -138,6 +149,14 @@ extract_agent/
 │       └── report.py               # report — 知识积累分析报告
 │
 ├── tests/                          # 测试
+│   ├── test_json_parser.py         # JSON 解析器单元测试
+│   ├── test_post_process.py        # 关键词后处理单元测试
+│   ├── test_skill_loader.py        # Skill 加载器单元测试
+│   ├── test_react_loop.py          # ReAct 循环单元测试
+│   ├── test_agent.py               # Agent 主流程单元测试
+│   ├── test_reflector.py           # 反思器单元测试
+│   ├── test_fast_path.py           # 快速路径单元测试
+│   ├── test_api_routes.py          # API 路由单元测试
 │   ├── test_cli_phase1.py ~ test_cli_phase5.py  # CLI 分阶段测试
 │   └── extra_test_api.py           # API 额外测试
 │
@@ -487,10 +506,49 @@ python -m extract_agent report summary
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/analyze` | 单条评论分析 |
+| POST | `/api/analyze/stream` | 单条评论流式分析（SSE） |
 | POST | `/api/analyze/batch` | 批量评论分析（同步） |
 | POST | `/api/task/submit` | 提交异步分析任务 |
 | GET | `/api/task/{task_id}` | 查询异步任务状态 |
 | GET | `/health` | 健康检查 |
+| GET | `/metrics` | Prometheus 指标 |
+
+### 流式分析 (SSE)
+
+`/api/analyze/stream` 端点返回 Server-Sent Events 流，每个事件格式为：
+
+```
+event: <type>
+data: <json>
+```
+
+事件类型：
+
+| 事件类型 | 说明 |
+|----------|------|
+| `start` | 分析开始，包含 `trace_id` |
+| `step_start` | ReAct 步骤开始 |
+| `token` | LLM 生成的单个 token |
+| `thought` | 完整思考文本 |
+| `tool_call` | 工具调用请求（含 `name` 和 `arguments`） |
+| `tool_result` | 工具执行结果（含 `name` 和 `success`） |
+| `final_summary` | Agent 最终总结 |
+| `reflection_start` | 反思阶段开始（启用反思时） |
+| `reflection_done` | 反思阶段结束（含 `rounds`） |
+| `result` | 组装后的完整分析结果 |
+| `error` | 错误信息 |
+| `done` | 流结束 |
+
+### Prometheus 监控指标
+
+访问 `/metrics` 端点获取 Prometheus 格式指标，支持以下 4 个指标：
+
+| 指标名 | 类型 | 标签 | 说明 |
+|--------|------|------|------|
+| `agent_requests_total` | Counter | `mode`, `status` | HTTP 请求总数 |
+| `agent_request_duration_seconds` | Histogram | `mode` | 请求耗时分布（9 个 bucket：0.1s ~ 60s） |
+| `agent_tool_calls_total` | Counter | `tool_name`, `success` | 工具调用次数（含 LLM 工具与纯计算工具） |
+| `agent_active_requests` | Gauge | — | 当前并发请求数 |
 
 ### 单条分析示例
 
@@ -609,12 +667,12 @@ Tool LLM 提取关键词（含 score）
 
 | 分类 | 配置项 | 默认值 | 说明 |
 |------|--------|--------|------|
-| Agent LLM | `AGENT_LLM_BASE_URL` | `http://192.168.12.42:8001/v1` | Agent LLM 服务地址 |
+| Agent LLM | `AGENT_LLM_BASE_URL` | `http://localhost:8001/v1` | Agent LLM 服务地址 |
 | Agent LLM | `AGENT_LLM_MODEL` | Qwen2.5-7B-Instruct | Agent LLM 模型名称 |
 | Agent LLM | `AGENT_LLM_API_KEY` | — | API 密钥（云端模式必填） |
 | Agent LLM | `AGENT_LLM_TEMPERATURE` | `0` | 生成温度 |
 | Agent LLM | `AGENT_LLM_MAX_TOKENS` | `4096` | 最大生成 token 数 |
-| Tool LLM | `TOOL_LLM_BASE_URL` | `http://192.168.12.42:8002/v1` | Tool LLM 服务地址 |
+| Tool LLM | `TOOL_LLM_BASE_URL` | `http://localhost:8002/v1` | Tool LLM 服务地址 |
 | Tool LLM | `TOOL_LLM_MODEL` | 微调模型路径 | Tool LLM 模型名称 |
 | Tool LLM | `TOOL_LLM_API_KEY` | — | API 密钥（云端模式必填） |
 | Tool LLM | `TOOL_LLM_TEMPERATURE` | `0` | 生成温度 |
@@ -633,21 +691,56 @@ Tool LLM 提取关键词（含 score）
 | 知识积累 | `ENABLE_KNOWLEDGE` | `false` | 是否启用知识积累（开启后 session 自动生成 ID） |
 | 知识积累 | `KNOWLEDGE_STORE_DIR` | `extract_agent_output/knowledge_store` | 知识 JSON 存储目录 |
 
+## 质量评估
+
+当前项目的分析质量评估基于人工测评，暂无专用自动化测试集。如需在新环境中部署使用，建议：
+
+1. 准备一批有标注的测试评论（建议 50+ 条，覆盖长评/短评/正面/负面/中立）
+2. 使用批量分析模式 (`run_batch`) 获取结果
+3. 人工比对关键词覆盖率、情感标签准确率
+4. 根据实际场景调整 `config.py` 中的后处理参数（如 `MAX_KEYWORD_LENGTH`、`N` 等）
+
 ## 测试
 
+### 核心逻辑单元测试（无需 LLM 服务）
+
+| 测试文件 | 覆盖目标 | 测试数量 |
+|----------|----------|----------|
+| `test_json_parser.py` | JSON 解析、修复、中文标点处理 | 20 |
+| `test_post_process.py` | 关键词后处理、config wrapper 一致性 | 11 |
+| `test_skill_loader.py` | Skill 扫描、加载、变量注入、reload | 15 |
+| `test_react_loop.py` | ReAct 循环（native/prompt/流式/超限/超时） | 28 |
+| `test_agent.py` | Agent 主流程（run/run_stream/降级/批量/反思） | 24 |
+| `test_reflector.py` | 反思器（reflect/收敛检测/apply_delta） | 14 |
+| `test_fast_path.py` | 快速路径（fast/offline/fallback） | 10 |
+| `test_api_routes.py` | API 路由（analyze/stream/batch/health） | 14 |
+
 ```bash
-# CLI 单元测试（分阶段）
+# 运行所有核心单元测试（推荐，无需外部服务）
+pytest extract_agent/tests/test_json_parser.py \
+       extract_agent/tests/test_post_process.py \
+       extract_agent/tests/test_skill_loader.py \
+       extract_agent/tests/test_react_loop.py \
+       extract_agent/tests/test_agent.py \
+       extract_agent/tests/test_reflector.py \
+       extract_agent/tests/test_fast_path.py \
+       extract_agent/tests/test_api_routes.py -v
+
+# 运行全部测试（包含 CLI 测试，需要 typer 依赖）
+pytest extract_agent/tests/ -v
+
+# 仅运行不需要 LLM 服务的单元测试
+pytest extract_agent/tests/ -m "not integration" -v
+```
+
+### CLI 集成测试（需要 typer 依赖）
+
+```bash
 pytest extract_agent/tests/test_cli_phase1.py -v
 pytest extract_agent/tests/test_cli_phase2.py -v
 pytest extract_agent/tests/test_cli_phase3.py -v
 pytest extract_agent/tests/test_cli_phase4.py -v
 pytest extract_agent/tests/test_cli_phase5.py -v
-
-# 运行全部测试
-pytest extract_agent/tests/ -v
-
-# 仅运行不需要 LLM 服务的单元测试
-pytest extract_agent/tests/ -m "not integration" -v
 ```
 
 ## 运行示例

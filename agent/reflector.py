@@ -19,6 +19,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 
 from ..config import AgentConfig
+from ..utils.json_parser import extract_json_from_response
 
 if TYPE_CHECKING:
     from ..llm_service import LLMService
@@ -78,36 +79,6 @@ class ResultReflector:
         self._config = config or AgentConfig()
         self._llm_service = llm_service
 
-    @staticmethod
-    def _extract_json_from_response(raw: str) -> Optional[str]:
-        text = raw.strip()
-
-        if text.startswith("```json"):
-            text = text.replace("```json", "").replace("```", "").strip()
-        elif text.startswith("```"):
-            text = text.replace("```", "").strip()
-
-        try:
-            json.loads(text)
-            return text
-        except json.JSONDecodeError:
-            pass
-
-        last_brace = raw.rfind("}")
-        if last_brace == -1:
-            return None
-
-        for i in range(len(raw)):
-            if raw[i] == "{":
-                candidate = raw[i:last_brace + 1]
-                try:
-                    json.loads(candidate)
-                    return candidate
-                except json.JSONDecodeError:
-                    continue
-
-        return None
-
     def reflect(
         self,
         original_text: str,
@@ -138,13 +109,24 @@ class ResultReflector:
                 )
                 raw = (llm_resp.content or "").strip()
             else:
-                from ..core.reflector_prompt import (
-                    _REFLECTION_SYSTEM_PROMPT,
-                    _REFLECTION_USER_TEMPLATE,
-                )
                 from openai import OpenAI
 
-                user_content = _REFLECTION_USER_TEMPLATE.format(
+                _FALLBACK_SYSTEM = (
+                    "你是中文电商评论关键词提取的严格质量审查员。"
+                    "审查关键词列表和情感分析结果，判断是否存在需要修正的问题。"
+                    "输出 JSON：{\"passed\": bool, \"issues\": [...], "
+                    "\"add_keywords\": [...], \"remove_keywords\": [...], "
+                    "\"corrected_sentiment\": {...}, \"summary\": \"...\"}"
+                )
+                _FALLBACK_USER = (
+                    "审查以下评论分析结果：\n\n"
+                    "原文（{text_length}字）：{original_text}\n\n"
+                    "关键词（共{keyword_count}个）：{keywords_json}\n\n"
+                    "情感：{sentiment_json}\n\n"
+                    "请逐句检查原文，严格审查关键词的完整性和准确性，然后输出 JSON。"
+                )
+
+                user_content = _FALLBACK_USER.format(
                     original_text=original_text,
                     text_length=len(original_text),
                     keyword_count=len(keywords),
@@ -158,7 +140,7 @@ class ResultReflector:
                 resp = client.chat.completions.create(
                     model=self._config.AGENT_LLM_MODEL,
                     messages=[
-                        {"role": "system", "content": _REFLECTION_SYSTEM_PROMPT},
+                        {"role": "system", "content": _FALLBACK_SYSTEM},
                         {"role": "user", "content": user_content},
                     ],
                     max_tokens=2048,
@@ -166,7 +148,7 @@ class ResultReflector:
                 )
                 raw = resp.choices[0].message.content.strip()
 
-            json_str = self._extract_json_from_response(raw)
+            json_str = extract_json_from_response(raw)
             if json_str is None:
                 raise json.JSONDecodeError("无法从反思输出中提取 JSON", raw, 0)
 

@@ -3,19 +3,24 @@ FastAPI 路由定义
 
 接口清单：
 - POST /api/analyze         单条评论分析
+- POST /api/analyze/stream  单条评论流式分析 (SSE)
 - POST /api/analyze/batch   批量评论分析（同步）
 - POST /api/task/submit     异步任务提交
 - GET  /api/task/{task_id}  异步任务状态查询
 - GET  /health              健康检查
 """
 
+import asyncio
 import hashlib
+import json as _json
 import logging
+import queue
 import time
 import uuid
 from typing import Any, Dict
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from sse_starlette.sse import EventSourceResponse
 
 from ..agent.agent import ReviewAnalysisAgent
 from ..config import AgentConfig
@@ -102,30 +107,93 @@ def _normalize_result(raw: Dict[str, Any]) -> Dict[str, Any]:
 # ===== 单条分析 =====
 
 @router.post("/api/analyze", response_model=AnalyzeSingleResponse)
-async def analyze_single(req: AnalyzeSingleRequest):
+async def analyze_single(req: AnalyzeSingleRequest, request: Request):
     """分析单条中文电商评论"""
     agent = get_agent()
     config = get_config()
+    trace_id = getattr(request.state, "trace_id", str(uuid.uuid4()))
 
     redis = get_redis()
     cache_key = _make_cache_key(req.text, req.mode.value)
     if redis:
         cached = await redis.get_cached_result(cache_key)
         if cached:
-            logger.info(f"命中缓存: {cache_key[:12]}...")
+            logger.info("[%s] 命中缓存: %s...", trace_id, cache_key[:12])
             return AnalyzeSingleResponse(**cached)
 
     if req.enable_reflection is not None:
         config.ENABLE_REFLECTION = req.enable_reflection
 
     use_fast = req.mode == "fast" or (req.mode == "auto" and len(req.text) < 30)
-    raw_result = agent.run(req.text, use_fast_path=use_fast)
+    raw_result = await asyncio.to_thread(
+        agent.run, req.text, use_fast_path=use_fast, trace_id=trace_id
+    )
     normalized = _normalize_result(raw_result)
 
     if redis:
         await redis.cache_result(cache_key, normalized)
 
     return AnalyzeSingleResponse(**normalized)
+
+
+# ===== 流式分析 (SSE) =====
+
+@router.post("/api/analyze/stream")
+async def analyze_stream(req: AnalyzeSingleRequest, request: Request):
+    """
+    流式分析单条评论，返回 Server-Sent Events (SSE)。
+
+    每个事件格式：
+        event: <type>
+        data: <json>
+
+    事件类型包括：start, token, step_start, thought, tool_call, tool_result,
+    final_summary, result, error, done。
+    """
+    agent = get_agent()
+    trace_id = getattr(request.state, "trace_id", str(uuid.uuid4()))
+
+    def _run_generator():
+        try:
+            for event in agent.run_stream(
+                comment=req.text,
+                trace_id=trace_id,
+                reviewer_id=req.reviewer_id,
+                product_id=req.product_id,
+                product_name=req.product_name,
+            ):
+                event_queue.put(event)
+        except Exception as e:
+            event_queue.put({"type": "error", "content": str(e)})
+        finally:
+            event_queue.put(None)
+
+    event_queue: queue.Queue = queue.Queue()
+
+    async def _sse_generator():
+        loop = asyncio.get_event_loop()
+        future = loop.run_in_executor(None, _run_generator)
+
+        while True:
+            event = await asyncio.to_thread(event_queue.get)
+            if event is None:
+                break
+            event_type = event.get("type", "message")
+            data = _json.dumps(event, ensure_ascii=False, default=str)
+            yield {"event": event_type, "data": data}
+
+        if future.done() and future.exception():
+            exc = future.exception()
+            logger.error("SSE generator 线程异常: %s", exc)
+            error_data = _json.dumps(
+                {"type": "error", "content": str(exc)}, ensure_ascii=False
+            )
+            yield {"event": "error", "data": error_data}
+
+    return EventSourceResponse(
+        _sse_generator(),
+        headers={"X-Trace-ID": trace_id},
+    )
 
 
 # ===== 批量分析 =====
@@ -142,7 +210,7 @@ async def analyze_batch(req: AnalyzeBatchRequest):
     use_fast = req.mode != "agent"
     start = time.time()
 
-    results = agent.run_batch(req.texts, use_fast_path=use_fast)
+    results = await asyncio.to_thread(agent.run_batch, req.texts, use_fast_path=use_fast)
 
     items = []
     completed = 0
@@ -179,7 +247,7 @@ async def _process_async_task(task_id: str, texts: list, mode: str, redis: Redis
         use_fast = mode != "agent"
         start = time.time()
 
-        results = agent.run_batch(texts, use_fast_path=use_fast)
+        results = await asyncio.to_thread(agent.run_batch, texts, use_fast_path=use_fast)
 
         normalized_results = []
         completed = 0

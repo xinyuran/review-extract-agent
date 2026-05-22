@@ -5,8 +5,15 @@ httpx>=0.27.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 redis>=5.0.0
+python-dotenv>=1.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
+
+# SSE 流式输出
+sse-starlette>=2.0.0
+
+# Prometheus 监控
+prometheus_client>=0.20.0
 
 # CLI 依赖
 typer[all]>=0.12.0

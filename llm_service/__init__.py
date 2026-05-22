@@ -5,8 +5,8 @@ LLM Service 层
 通过 SkillLoader 加载 SKILL.md 技能文件构建 prompt。
 """
 
-from .models import SkillPrompt, LLMResponse
+from .models import SkillPrompt, LLMResponse, LLMStreamChunk
 from .skill_loader import SkillLoader
 from .service import LLMService
 
-__all__ = ["SkillPrompt", "LLMResponse", "SkillLoader", "LLMService"]
+__all__ = ["SkillPrompt", "LLMResponse", "LLMStreamChunk", "SkillLoader", "LLMService"]

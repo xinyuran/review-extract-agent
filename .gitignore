@@ -52,3 +52,4 @@ config.yaml
 
 # ==================== no_upload_files ====================
 no_upload/
+.claude
