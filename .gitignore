@@ -40,6 +40,8 @@ extract_agent_output/
 # ==================== 本地配置文件 ====================
 .extract-agent.yaml
 config.yaml
+.cursor/
+.claude/
 
 # ==================== 日志 ====================
 *.log

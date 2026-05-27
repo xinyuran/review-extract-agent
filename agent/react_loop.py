@@ -82,6 +82,9 @@ def truncate_result(result_str: str, max_chars: int = MAX_TOOL_RESULT_CHARS) -> 
         return result_str[:max_chars - 20] + '...(截断)"}'
 
 
+_COMPACT_THRESHOLD_CHARS = 12000
+
+
 class ReactLoop:
     """
     统一的 ReAct 循环执行器。
@@ -97,12 +100,14 @@ class ReactLoop:
         tool_definitions: List[Dict[str, Any]],
         max_steps: int = 10,
         timeout: int = 1200,
+        compact_threshold: int = _COMPACT_THRESHOLD_CHARS,
     ):
         self._llm_service = llm_service
         self._execute_tool = execute_tool
         self._tool_definitions = tool_definitions
         self._max_steps = max_steps
         self._timeout = timeout
+        self._compact_threshold = compact_threshold
 
     def run(
         self,
@@ -158,6 +163,11 @@ class ReactLoop:
             if elapsed > self._timeout:
                 logger.warning("Agent 超时 (%.1fs > %ds)", elapsed, self._timeout)
                 break
+
+            if memory.get_total_chars() > self._compact_threshold:
+                trimmed = memory.compact()
+                if trimmed:
+                    logger.info("上下文裁剪: 压缩了 %d 条旧 tool_result", trimmed)
 
             step_num = len(agent_trace) + 1
             logger.info("--- Agent Step %d (native) ---", step_num)
@@ -465,6 +475,11 @@ class ReactLoop:
             if elapsed > self._timeout:
                 logger.warning("Agent 超时 (%.1fs > %ds)", elapsed, self._timeout)
                 break
+
+            if memory.get_total_chars() > self._compact_threshold:
+                trimmed = memory.compact()
+                if trimmed:
+                    logger.info("上下文裁剪: 压缩了 %d 条旧 tool_result", trimmed)
 
             step_num = len(agent_trace) + 1
             logger.info("--- Agent Step %d (prompt-based) ---", step_num)

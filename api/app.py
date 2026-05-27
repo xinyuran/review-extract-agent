@@ -12,6 +12,7 @@ FastAPI 应用入口
     CORS_ALLOWED_ORIGINS   CORS 允许的域名（逗号分隔）
 """
 
+import hmac
 import logging
 import os
 import time
@@ -78,7 +79,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         elif api_key_header:
             provided_key = api_key_header.strip()
 
-        if provided_key != _API_KEY:
+        if not hmac.compare_digest(provided_key.encode(), _API_KEY.encode()):
             from fastapi.responses import JSONResponse
             return JSONResponse(
                 status_code=401,

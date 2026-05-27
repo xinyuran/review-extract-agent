@@ -77,6 +77,11 @@ class ResultReflector:
         llm_service: Optional[LLMService] = None,
     ):
         self._config = config or AgentConfig()
+        if llm_service is None:
+            raise ValueError(
+                "ResultReflector 需要 LLMService 实例。"
+                "offline 模式下不应创建 Reflector。"
+            )
         self._llm_service = llm_service
 
     def reflect(
@@ -92,61 +97,21 @@ class ResultReflector:
         sentiment_json = json.dumps(sentiment, ensure_ascii=False)
 
         try:
-            if self._llm_service:
-                skill = self._llm_service.load_skill(
-                    "reflector",
-                    text_length=str(len(original_text)),
-                    original_text=original_text,
-                    keyword_count=str(len(keywords)),
-                    keywords_json=keywords_json,
-                    sentiment_json=sentiment_json,
-                )
-                llm_resp = self._llm_service.call_agent(
-                    messages=[
-                        {"role": "system", "content": skill.system},
-                        {"role": "user", "content": skill.user},
-                    ],
-                )
-                raw = (llm_resp.content or "").strip()
-            else:
-                from openai import OpenAI
-
-                _FALLBACK_SYSTEM = (
-                    "你是中文电商评论关键词提取的严格质量审查员。"
-                    "审查关键词列表和情感分析结果，判断是否存在需要修正的问题。"
-                    "输出 JSON：{\"passed\": bool, \"issues\": [...], "
-                    "\"add_keywords\": [...], \"remove_keywords\": [...], "
-                    "\"corrected_sentiment\": {...}, \"summary\": \"...\"}"
-                )
-                _FALLBACK_USER = (
-                    "审查以下评论分析结果：\n\n"
-                    "原文（{text_length}字）：{original_text}\n\n"
-                    "关键词（共{keyword_count}个）：{keywords_json}\n\n"
-                    "情感：{sentiment_json}\n\n"
-                    "请逐句检查原文，严格审查关键词的完整性和准确性，然后输出 JSON。"
-                )
-
-                user_content = _FALLBACK_USER.format(
-                    original_text=original_text,
-                    text_length=len(original_text),
-                    keyword_count=len(keywords),
-                    keywords_json=keywords_json,
-                    sentiment_json=sentiment_json,
-                )
-                client = OpenAI(
-                    base_url=self._config.AGENT_LLM_BASE_URL,
-                    api_key=self._config.AGENT_LLM_API_KEY,
-                )
-                resp = client.chat.completions.create(
-                    model=self._config.AGENT_LLM_MODEL,
-                    messages=[
-                        {"role": "system", "content": _FALLBACK_SYSTEM},
-                        {"role": "user", "content": user_content},
-                    ],
-                    max_tokens=2048,
-                    temperature=0,
-                )
-                raw = resp.choices[0].message.content.strip()
+            skill = self._llm_service.load_skill(
+                "reflector",
+                text_length=str(len(original_text)),
+                original_text=original_text,
+                keyword_count=str(len(keywords)),
+                keywords_json=keywords_json,
+                sentiment_json=sentiment_json,
+            )
+            llm_resp = self._llm_service.call_agent(
+                messages=[
+                    {"role": "system", "content": skill.system},
+                    {"role": "user", "content": skill.user},
+                ],
+            )
+            raw = (llm_resp.content or "").strip()
 
             json_str = extract_json_from_response(raw)
             if json_str is None:

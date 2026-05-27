@@ -15,6 +15,7 @@ import hashlib
 import json as _json
 import logging
 import queue
+import threading
 import time
 import uuid
 from typing import Any, Dict
@@ -45,20 +46,25 @@ router = APIRouter()
 _agent: ReviewAnalysisAgent | None = None
 _config: AgentConfig | None = None
 _redis: RedisManager | None = None
+_init_lock = threading.Lock()
 
 
 def get_agent() -> ReviewAnalysisAgent:
     global _agent, _config
     if _agent is None:
-        _config = AgentConfig()
-        _agent = ReviewAnalysisAgent(_config)
+        with _init_lock:
+            if _agent is None:
+                _config = AgentConfig()
+                _agent = ReviewAnalysisAgent(_config)
     return _agent
 
 
 def get_config() -> AgentConfig:
     global _config
     if _config is None:
-        _config = AgentConfig()
+        with _init_lock:
+            if _config is None:
+                _config = AgentConfig()
     return _config
 
 

@@ -73,6 +73,50 @@ class AgentMemory:
         })
 
     # ------------------------------------------------------------------
+    # 上下文裁剪
+    # ------------------------------------------------------------------
+
+    def get_total_chars(self) -> int:
+        """估算消息历史的总字符数"""
+        total = 0
+        for msg in self._messages:
+            total += len(msg.get("content", "") or "")
+            for tc in msg.get("tool_calls", []):
+                fn = tc.get("function", {})
+                total += len(fn.get("name", "")) + len(fn.get("arguments", ""))
+        return total
+
+    def compact(self, keep_recent: int = 2) -> int:
+        """
+        裁剪旧 tool_result 消息，保留最近 N 条完整结果。
+
+        已裁剪的 tool_result 内容替换为占位符，保持消息结构不变
+        （OpenAI API 要求 tool message 与 tool_call 一一对应）。
+
+        Returns:
+            被裁剪的消息数
+        """
+        tool_msg_indices = [
+            i for i, m in enumerate(self._messages)
+            if m.get("role") == "tool"
+        ]
+        if len(tool_msg_indices) <= keep_recent:
+            return 0
+
+        trimmed = 0
+        for idx in tool_msg_indices[:-keep_recent]:
+            content = self._messages[idx].get("content", "")
+            if content and content != "[历史结果已压缩]":
+                self._messages[idx] = {
+                    "role": "tool",
+                    "name": self._messages[idx].get("name", ""),
+                    "content": "[历史结果已压缩]",
+                    "tool_call_id": self._messages[idx].get("tool_call_id", ""),
+                }
+                trimmed += 1
+        return trimmed
+
+    # ------------------------------------------------------------------
     # 查询接口
     # ------------------------------------------------------------------
 

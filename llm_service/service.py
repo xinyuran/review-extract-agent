@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from openai import OpenAI
 
@@ -21,6 +23,39 @@ from .models import LLMResponse, LLMStreamChunk, SkillPrompt
 from .skill_loader import SkillLoader
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+_RETRYABLE_KEYWORDS = (
+    "rate limit", "429", "502", "503", "529",
+    "overloaded", "service unavailable", "connection",
+    "timeout", "timed out",
+)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(kw in msg for kw in _RETRYABLE_KEYWORDS)
+
+
+def with_retry(
+    fn: Callable[[], T],
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> T:
+    """指数退避 + 随机抖动重试。仅对瞬时错误重试。"""
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except Exception as e:
+            if attempt == max_retries or not _is_retryable(e):
+                raise
+            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(
+                "LLM 调用失败 (attempt %d/%d), %.1fs 后重试: %s",
+                attempt + 1, max_retries, delay, e,
+            )
+            time.sleep(delay)
 
 
 class LLMService:
@@ -37,6 +72,7 @@ class LLMService:
         self._agent_client: Optional[OpenAI] = None
         self._tool_client: Optional[OpenAI] = None
         self._native_tool_calling: Optional[bool] = None
+        self._detect_lock = threading.Lock()
 
         backend = self.config.get_backend_mode()
         if backend != "offline":
@@ -88,10 +124,30 @@ class LLMService:
             kwargs["tool_choice"] = tool_choice
 
         start = time.time()
-        resp = self._agent_client.chat.completions.create(**kwargs)
+        resp = with_retry(lambda: self._agent_client.chat.completions.create(**kwargs))
         elapsed_ms = round((time.time() - start) * 1000, 2)
 
         message = resp.choices[0].message
+
+        if resp.choices[0].finish_reason == "length" and not message.tool_calls:
+            logger.warning("Agent LLM 输出被截断 (finish_reason=length)，尝试续写")
+            continuation_messages = list(messages) + [
+                {"role": "assistant", "content": message.content or ""},
+                {"role": "user", "content": "你的输出被截断了，请从中断处继续，不要重复已有内容。"},
+            ]
+            cont_kwargs = dict(kwargs, messages=continuation_messages)
+            cont_kwargs.pop("tools", None)
+            cont_kwargs.pop("tool_choice", None)
+            try:
+                cont_resp = with_retry(
+                    lambda: self._agent_client.chat.completions.create(**cont_kwargs)
+                )
+                cont_content = cont_resp.choices[0].message.content or ""
+                message.content = (message.content or "") + cont_content
+                logger.info("续写成功，追加 %d 字符", len(cont_content))
+            except Exception as e:
+                logger.warning("续写失败: %s，使用截断的原始输出", e)
+
         tool_calls_data = None
         if message.tool_calls:
             tool_calls_data = [
@@ -248,7 +304,7 @@ class LLMService:
                 kwargs["extra_body"] = extra_body
 
         start = time.time()
-        resp = self._tool_client.chat.completions.create(**kwargs)
+        resp = with_retry(lambda: self._tool_client.chat.completions.create(**kwargs))
         elapsed_ms = round((time.time() - start) * 1000, 2)
 
         usage_data = None
@@ -286,21 +342,26 @@ class LLMService:
         """
         探测 vLLM 是否支持原生 tool calling。
         使用 httpx 直接发请求，设置严格超时。
+        线程安全：double-check locking 保护首次探测。
         """
         if self._native_tool_calling is not None:
             return self._native_tool_calling
 
-        mode_cfg = self.config.AGENT_TOOL_CALLING_MODE.lower()
-        if mode_cfg == "native":
-            self._native_tool_calling = True
-        elif mode_cfg == "prompt":
-            self._native_tool_calling = False
-        else:
-            self._native_tool_calling = self._probe_native_tool_calling()
+        with self._detect_lock:
+            if self._native_tool_calling is not None:
+                return self._native_tool_calling
 
-        mode_name = "原生 Function Calling" if self._native_tool_calling else "Prompt-based"
-        logger.info("Agent 工具调用模式: %s (配置=%s)", mode_name, mode_cfg)
-        return self._native_tool_calling
+            mode_cfg = self.config.AGENT_TOOL_CALLING_MODE.lower()
+            if mode_cfg == "native":
+                self._native_tool_calling = True
+            elif mode_cfg == "prompt":
+                self._native_tool_calling = False
+            else:
+                self._native_tool_calling = self._probe_native_tool_calling()
+
+            mode_name = "原生 Function Calling" if self._native_tool_calling else "Prompt-based"
+            logger.info("Agent 工具调用模式: %s (配置=%s)", mode_name, mode_cfg)
+            return self._native_tool_calling
 
     def _probe_native_tool_calling(self) -> bool:
         import httpx
