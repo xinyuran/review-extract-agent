@@ -157,6 +157,12 @@ extract_agent/
 │   ├── test_reflector.py           # 反思器单元测试
 │   ├── test_fast_path.py           # 快速路径单元测试
 │   ├── test_api_routes.py          # API 路由单元测试
+│   ├── test_api_key_security.py    # API Key 认证安全测试
+│   ├── test_reflector_fallback.py  # Reflector 架构规范测试
+│   ├── test_thread_safety.py       # 线程安全测试
+│   ├── test_llm_retry.py           # LLM 调用重试测试
+│   ├── test_truncation_recovery.py # 输出截断恢复测试
+│   ├── test_context_compact.py     # 上下文裁剪测试
 │   ├── test_cli_phase1.py ~ test_cli_phase5.py  # CLI 分阶段测试
 │   └── extra_test_api.py           # API 额外测试
 │
@@ -710,21 +716,24 @@ Tool LLM 提取关键词（含 score）
 | `test_post_process.py` | 关键词后处理、config wrapper 一致性 | 11 |
 | `test_skill_loader.py` | Skill 扫描、加载、变量注入、reload | 15 |
 | `test_react_loop.py` | ReAct 循环（native/prompt/流式/超限/超时） | 28 |
-| `test_agent.py` | Agent 主流程（run/run_stream/降级/批量/反思） | 24 |
-| `test_reflector.py` | 反思器（reflect/收敛检测/apply_delta） | 14 |
+| `test_agent.py` | Agent 主流程（run/run_stream/降级/批量/反思） | 22 |
+| `test_reflector.py` | 反思器（reflect/收敛检测/apply_delta） | 16 |
 | `test_fast_path.py` | 快速路径（fast/offline/fallback） | 10 |
-| `test_api_routes.py` | API 路由（analyze/stream/batch/health） | 14 |
+| `test_api_routes.py` | API 路由（analyze/stream/batch/health） | 15 |
+| `test_api_key_security.py` | API Key 认证安全（时序攻击防护、hmac.compare_digest） | 7 |
+| `test_reflector_fallback.py` | Reflector 架构规范（无直连 OpenAI 客户端） | 3 |
+| `test_thread_safety.py` | 线程安全（全局单例并发、LLM 模式探测并发） | 6 |
+| `test_llm_retry.py` | LLM 调用重试（指数退避、瞬时错误分类） | 14 |
+| `test_truncation_recovery.py` | 输出截断恢复（finish_reason=length 续写） | 5 |
+| `test_context_compact.py` | 上下文裁剪（Memory compact、ReactLoop 自动触发） | 10 |
 
 ```bash
 # 运行所有核心单元测试（推荐，无需外部服务）
-pytest extract_agent/tests/test_json_parser.py \
-       extract_agent/tests/test_post_process.py \
-       extract_agent/tests/test_skill_loader.py \
-       extract_agent/tests/test_react_loop.py \
-       extract_agent/tests/test_agent.py \
-       extract_agent/tests/test_reflector.py \
-       extract_agent/tests/test_fast_path.py \
-       extract_agent/tests/test_api_routes.py -v
+pytest extract_agent/tests/ --ignore=extract_agent/tests/test_cli_phase1.py \
+       --ignore=extract_agent/tests/test_cli_phase2.py \
+       --ignore=extract_agent/tests/test_cli_phase3.py \
+       --ignore=extract_agent/tests/test_cli_phase4.py \
+       --ignore=extract_agent/tests/test_cli_phase5.py -v
 
 # 运行全部测试（包含 CLI 测试，需要 typer 依赖）
 pytest extract_agent/tests/ -v

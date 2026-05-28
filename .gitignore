@@ -42,6 +42,7 @@ extract_agent_output/
 config.yaml
 .cursor/
 .claude/
+.understand-anything/
 
 # ==================== 日志 ====================
 *.log

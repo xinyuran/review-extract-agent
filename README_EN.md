@@ -103,10 +103,20 @@ extract_agent/
 │   └── sentiment_tool.py           # Sentiment analysis tool
 │
 ├── core/                           # Core capability modules
-│   ├── preprocess.py               # Text preprocessing
-│   ├── post_process.py             # Keyword post-processing
+│   ├── preprocess.py               # Text preprocessing (entry point, combines cleaners submodule)
+│   ├── post_process.py             # Keyword post-processing (entry point, combines filters submodule)
 │   ├── fallback_extractor.py       # Jieba fallback extraction
-│   └── stopwords.txt               # Stopword list
+│   ├── stopwords.txt               # Stopword list
+│   ├── cleaners/                   # Text cleaning submodule
+│   │   ├── time_cleaner.py         # Time/date expression removal
+│   │   ├── url_cleaner.py          # URL/email/phone number removal
+│   │   ├── emoji_cleaner.py        # Emoji/garbled text/special character handling
+│   │   └── normalize.py            # Unicode normalization, fullwidth/halfwidth conversion
+│   └── filters/                    # Keyword filtering submodule
+│       ├── text_alignment.py       # Original text alignment check
+│       ├── stopwords.py            # Stopword filtering
+│       ├── dedup.py                # Keyword deduplication
+│       └── length_filter.py        # Length/English filtering
 │
 ├── trajectory/                     # Trajectory data export
 │   ├── exporter.py                 # TrajectoryExporter (load session → export SFT)
@@ -121,6 +131,7 @@ extract_agent/
 │   ├── app.py                      # FastAPI application entry
 │   ├── routes.py                   # Route definitions
 │   ├── schemas.py                  # Request/Response Pydantic models
+│   ├── metrics.py                  # Prometheus metrics definition & middleware
 │   └── redis_client.py             # Redis client wrapper
 │
 ├── cli/                            # Command-line interface
@@ -147,6 +158,12 @@ extract_agent/
 │   ├── test_reflector.py           # Reflector unit tests
 │   ├── test_fast_path.py           # Fast path unit tests
 │   ├── test_api_routes.py          # API routes unit tests
+│   ├── test_api_key_security.py    # API Key auth security tests
+│   ├── test_reflector_fallback.py  # Reflector architecture compliance tests
+│   ├── test_thread_safety.py       # Thread safety tests
+│   ├── test_llm_retry.py           # LLM call retry tests
+│   ├── test_truncation_recovery.py # Output truncation recovery tests
+│   ├── test_context_compact.py     # Context compaction tests
 │   ├── test_cli_phase1.py ~ test_cli_phase5.py  # CLI phased tests
 │   └── extra_test_api.py           # API extra tests
 │
@@ -683,21 +700,24 @@ Current project analysis quality evaluation is based on manual assessment; no de
 | `test_post_process.py` | Keyword post-processing, config wrapper consistency | 11 |
 | `test_skill_loader.py` | Skill scanning, loading, variable injection, reload | 15 |
 | `test_react_loop.py` | ReAct loop (native/prompt/streaming/limit/timeout) | 28 |
-| `test_agent.py` | Agent main flow (run/run_stream/fallback/batch/reflection) | 24 |
-| `test_reflector.py` | Reflector (reflect/convergence detection/apply_delta) | 14 |
+| `test_agent.py` | Agent main flow (run/run_stream/fallback/batch/reflection) | 22 |
+| `test_reflector.py` | Reflector (reflect/convergence detection/apply_delta) | 16 |
 | `test_fast_path.py` | Fast path (fast/offline/fallback) | 10 |
-| `test_api_routes.py` | API routes (analyze/stream/batch/health) | 14 |
+| `test_api_routes.py` | API routes (analyze/stream/batch/health) | 15 |
+| `test_api_key_security.py` | API Key auth security (timing attack protection, hmac.compare_digest) | 7 |
+| `test_reflector_fallback.py` | Reflector architecture compliance (no direct OpenAI client) | 3 |
+| `test_thread_safety.py` | Thread safety (global singleton concurrency, LLM mode detection concurrency) | 6 |
+| `test_llm_retry.py` | LLM call retry (exponential backoff, transient error classification) | 14 |
+| `test_truncation_recovery.py` | Output truncation recovery (finish_reason=length continuation) | 5 |
+| `test_context_compact.py` | Context compaction (Memory compact, ReactLoop auto-trigger) | 10 |
 
 ```bash
 # Run all core unit tests (recommended, no external services needed)
-pytest extract_agent/tests/test_json_parser.py \
-       extract_agent/tests/test_post_process.py \
-       extract_agent/tests/test_skill_loader.py \
-       extract_agent/tests/test_react_loop.py \
-       extract_agent/tests/test_agent.py \
-       extract_agent/tests/test_reflector.py \
-       extract_agent/tests/test_fast_path.py \
-       extract_agent/tests/test_api_routes.py -v
+pytest extract_agent/tests/ --ignore=extract_agent/tests/test_cli_phase1.py \
+       --ignore=extract_agent/tests/test_cli_phase2.py \
+       --ignore=extract_agent/tests/test_cli_phase3.py \
+       --ignore=extract_agent/tests/test_cli_phase4.py \
+       --ignore=extract_agent/tests/test_cli_phase5.py -v
 
 # Run all tests (includes CLI tests, requires typer dependency)
 pytest extract_agent/tests/ -v
