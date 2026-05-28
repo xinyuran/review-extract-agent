@@ -6,40 +6,7 @@ A review analysis Agent based on the ReAct (Thought → Action → Observation) 
 
 ## Architecture Overview
 
-```
-User Request (Python API / FastAPI / CLI)
-   │
-   ▼
-┌──────────────────────────────────────────────────────────────┐
-│  ① Skill Layer (skills/*.skill.md)                           │
-│     Pure prompt engineering artifacts, Markdown + YAML        │
-│     Defines LLM roles, rules, and output formats              │
-├──────────────────────────────────────────────────────────────┤
-│  ② Agent Layer (agent/)                                       │
-│     ReviewAnalysisAgent — ReAct main loop                     │
-│     Thought → Action → Observation → Review → Correct/Proceed │
-│     Orchestrates LLM-powered & pure-computation tools         │
-│     Integrates knowledge accumulation updates                 │
-├──────────────────────────────────────────────────────────────┤
-│  ③ LLM Service Layer (llm_service/)                           │
-│     Unified LLM interaction: call_agent / call_tool           │
-│     SkillLoader parses SKILL.md → structured prompts          │
-│     Auto-detects Native FC vs Prompt-based mode               │
-│     Trajectory collection (TrajectoryRecorder)                │
-├──────────────────────────────────────────────────────────────┤
-│  ④ Tool Layer (tools/)                                        │
-│     Pure computation/API execution, context-agnostic          │
-│     text_preprocess / keyword_extract / jieba_extract          │
-│     validate_keywords / sentiment_analyze                      │
-└──────────────────────────────────────────────────────────────┘
-   │
-   ▼
-Structured Analysis Report (JSON)
-   ├──→ CLI Output / Session Persistence
-   ├──→ Trajectory JSONL (SFT Training Data)
-   ├──→ Knowledge Accumulation (Reviewer/Product Profiles)
-   └──→ Redis (Cache/Async Tasks)
-```
+![Four-Layer Architecture](imgs/High-Level_Architecture.png)
 
 ### Four-Layer Separation of Concerns
 
@@ -53,6 +20,8 @@ Structured Analysis Report (JSON)
 ### Agent ReAct Workflow
 
 The Agent operates through **iterative loops**, not fixed pipelines:
+
+![Agent Execution Flow](imgs/Agent_Execution_Flow.png)
 
 1. After each tool call, review result quality
 2. If issues found (duplicates, insufficient quantity, poor quality), retry relevant tools

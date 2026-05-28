@@ -6,40 +6,7 @@
 
 ## 架构概览
 
-```
-用户请求 (Python API / FastAPI / CLI)
-   │
-   ▼
-┌──────────────────────────────────────────────────────────────┐
-│  ① Skill 层 (skills/*.skill.md)                              │
-│     纯 Prompt 工程产物，Markdown + YAML frontmatter          │
-│     定义 LLM 在每个阶段的角色、规则和输出格式                   │
-├──────────────────────────────────────────────────────────────┤
-│  ② Agent 层 (agent/)                                         │
-│     ReviewAnalysisAgent — ReAct 主循环                        │
-│     Thought → Action → Observation → 审查 → 修正 / 推进       │
-│     调度 LLM-powered 工具 & 纯计算工具                         │
-│     集成知识积累更新                                           │
-├──────────────────────────────────────────────────────────────┤
-│  ③ LLM Service 层 (llm_service/)                             │
-│     统一 LLM 交互：call_agent / call_tool                     │
-│     SkillLoader 解析 SKILL.md → 结构化 Prompt                 │
-│     自动检测 Native FC vs Prompt-based 模式                    │
-│     轨迹采集 (TrajectoryRecorder)                             │
-├──────────────────────────────────────────────────────────────┤
-│  ④ Tool 层 (tools/)                                          │
-│     纯计算/API 执行，不感知调用上下文                            │
-│     text_preprocess / keyword_extract / jieba_extract          │
-│     validate_keywords / sentiment_analyze                      │
-└──────────────────────────────────────────────────────────────┘
-   │
-   ▼
-结构化分析报告 (JSON)
-   ├──→ CLI 输出 / Session 持久化
-   ├──→ 轨迹 JSONL (SFT 训练数据)
-   ├──→ 知识积累 (评论者画像 / 商品画像)
-   └──→ Redis (缓存/异步任务)
-```
+![四层架构](imgs/High-Level_Architecture.png)
 
 ### 四层职责解耦
 
@@ -53,6 +20,8 @@
 ### Agent ReAct 工作模式
 
 Agent 采用**迭代循环**方式工作，而非固定管线：
+
+![Agent 执行流程](imgs/Agent_Execution_Flow.png)
 
 1. 每次调用工具后，审查结果质量
 2. 如发现问题（重复、数量不足、质量不佳），回头重新调用相关工具修正
